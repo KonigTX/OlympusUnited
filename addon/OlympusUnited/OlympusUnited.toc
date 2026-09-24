@@ -2,7 +2,7 @@
 ## Title: Olympus United
 ## Notes: Member-only Olympus Chat, layer help, events, guild connections, and census totals.
 ## Author: KonigTX
-## Version: 0.5.0
+## Version: 0.6.0
 ## SavedVariables: OlympusUnitedDB
 ## IconTexture: Interface\AddOns\OlympusUnited\Media\OlympusLogo
 ## X-Category: Guild, Chat & Communication

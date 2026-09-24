@@ -189,7 +189,11 @@ if ($InstallPath) {
         $relative = $item.Entry.Substring("OlympusUnited/".Length).Replace('/', '\')
         $destination = Join-Path $copyRoot $relative
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-        Copy-Item -LiteralPath $item.Source -Destination $destination -Force
+        $sourceFull = [System.IO.Path]::GetFullPath($item.Source).TrimEnd('\')
+        $destinationFull = [System.IO.Path]::GetFullPath($destination).TrimEnd('\')
+        if (-not $sourceFull.Equals($destinationFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $item.Source -Destination $destination -Force
+        }
         $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.Source).Hash.ToLowerInvariant()
         $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
         if ($sourceHash -ne $installedHash) { throw "Installed hash mismatch: $relative" }

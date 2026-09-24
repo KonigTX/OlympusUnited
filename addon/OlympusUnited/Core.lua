@@ -39,7 +39,11 @@ function OU.StatusText()
     if IsInGuild and IsInGuild() then connections[#connections + 1] = L.STATUS_GUILD end
     if OU.DB.bridgeMode then connections[#connections + 1] = L.STATUS_LINKING end
     local linkCount = OU.Util.Count(OU.DB.bridges)
-    if linkCount > 0 then connections[#connections + 1] = L.STATUS_LINKS:format(linkCount) end
+    if linkCount == 1 then
+        connections[#connections + 1] = L.STATUS_LINK_ONE
+    elseif linkCount > 1 then
+        connections[#connections + 1] = L.STATUS_LINKS:format(linkCount)
+    end
     local connection = #connections > 0 and table.concat(connections, "  •  ") or L.STATUS_OFFLINE
     return role .. "  •  " .. connection .. "  •  " .. L.STATUS_PEOPLE:format(OU.Util.Count(OU.Runtime.peers))
 end
@@ -94,7 +98,10 @@ controller:SetScript("OnEvent", function(self, event, ...)
         else
             OU.Network.SendHello()
         end
-        if OU.Census then OU.Census.Start() end
+        if OU.Census then
+            if C_Timer and C_Timer.After then C_Timer.After(3, function() OU.Census.Start() end)
+            else OU.Census.Start() end
+        end
         OU.Print(L.CHAT_READY)
     elseif event == "CHAT_MSG_ADDON" or event == "CHAT_MSG_ADDON_LOGGED" then
         OU.Network.OnAddonMessage(...)

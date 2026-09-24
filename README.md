@@ -1,10 +1,10 @@
 # Olympus United
 
-Olympus United is an opt-in in-game home for participating Olympus guilds in World of Warcraft: Forever. Version 0.5.0 adds an optional, context-aware chat guard alongside member-only Olympus Chat, Layers, Events, Census, and People.
+Olympus United is an opt-in in-game home for participating Olympus guilds in World of Warcraft: Forever. Version 0.6.0 brings guild review, safer cross-guild connections, a more reliable Census, and a clearer native interface alongside member-only Olympus Chat, Layers, Events, and People.
 
 ## Download and install
 
-1. Extract `OlympusUnited-0.5.0.zip`.
+1. Extract `OlympusUnited-0.6.0.zip`.
 2. Copy the included `OlympusUnited` folder into the Forever client's `Interface/AddOns` directory.
 3. Restart the client or type `/reload` when you are ready.
 4. Type `/ou` to open the window.
@@ -89,7 +89,7 @@ Configured connectors can carry bounded Approve, Deny, and Reconsider decisions.
 
 `OlympusUnitedDB` stores typed settings, the exact participating-guild state, privacy-minimal guild-review records, the chat slow-mode delay, the chat-guard toggle, a bounded local cache of recently observed character names and guilds, trusted connectors, recruiting cooldown timestamps, the private do-not-contact list, and a repaired safe window position. Guild-review records contain only the guild display/key state, bounded timestamps and counters, evidence bits, and current decision metadata; they never contain chat text, roster names, player names, GUIDs, origins, connectors, raw messages, or decision history. Chat history, Census reports, requested member lists, election state, and routes are session-only.
 
-The unreleased state migration rebuilds SavedVariables from supported typed fields, drops unknown or malformed data, pins exact `OLYMPUS`, and preserves a non-root guild only when it has a valid current approved governance record. Saved and runtime collections have hard caps and expiry rules; saturation rejects new work without evicting a live safety or trust decision.
+The 0.6.0 state migration rebuilds SavedVariables from supported typed fields, drops unknown or malformed data, pins exact `OLYMPUS`, and preserves a non-root guild only when it has a valid current approved governance record. Saved and runtime collections have hard caps and expiry rules; saturation rejects new work without evicting a live safety or trust decision.
 
 Incoming addon messages are length-bounded, strictly validated, deduplicated, and admitted through layered per-origin, per-connector, per-type, receiver-wide, forwarding, and memory limits. Relayed traffic is bound to the actual configured transport identity while the original author remains the displayed author. Protocol version 1 remains unchanged; the additive guild-decision message is rejected safely by older copies that do not know it.
 

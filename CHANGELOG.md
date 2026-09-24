@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-09-24
 
 - Corrected public author metadata to the exact `KonigTX` spelling and made isolated packages byte-identical across supported PowerShell runtimes with a canonical stored ZIP format.
 - Rebuilt SavedVariables through an explicit typed schema migration that removes unknown keys, repairs unsafe window values, and caps every saved map.
@@ -11,6 +11,10 @@
 - Added hard caps and expiry pruning across runtime, Census, chat guard, recruiting, routing, and requested-roster collections without saving chat contents or Census names.
 - Removed four unproven legacy API fallbacks and kept only exact-build-supported chat, invite, and filter paths.
 - Expanded adversarial regression coverage for migration, exact guild trust, governance authority and routing, caps/expiry, relay admission, UI gating, and cross-runtime packages.
+- Made the active workflow use Blizzard's muted disabled-button state and removed the custom yellow underline.
+- Replaced the Census expand/collapse triangles with plain `+` and `-` markers so font substitution cannot turn them into emoji.
+- Corrected the one-link wording and renamed the People action to **Add connector**.
+- Added a short login delay and bounded retries when WoW delivers an incomplete guild roster, avoiding a misleading Census failure during startup.
 
 ## 0.5.0 - 2026-09-24
 

@@ -128,6 +128,8 @@ assert(safePoint == "CENTER" and safeX == 0 and safeY == 0,
 OU.Open()
 assert(OU.UI.frame:IsShown() and OU.UI.status.text:find("OLYMPUS", 1, true), "opening shows member status")
 assert(OU.UI.tabs.FEED:GetText() == "Olympus Chat" and OU.UI.tabs.CENSUS:GetText() == "Census", "all five tabs use player language")
+assert(not OU.UI.tabs.FEED:IsEnabled() and OU.UI.tabs.LAYERS:IsEnabled(),
+    "the active tab uses Blizzard's disabled-button state instead of a custom highlight")
 OU.UI.helpButton.scripts.OnEnter(OU.UI.helpButton)
 assert(GameTooltip:IsShown() and GameTooltip.text == "How to use Olympus United" and #GameTooltip.lines == 5,
     "[?] hover provides the concise guide without a modal")
@@ -159,6 +161,8 @@ assert(OU.UI.rows[1].heading.text == "Olympus Chat is for guild members"
 OU.Identity = memberIdentity
 OU.RefreshUI()
 OU.UI.tabs.LAYERS.scripts.OnClick()
+assert(OU.UI.tabs.FEED:IsEnabled() and not OU.UI.tabs.LAYERS:IsEnabled(),
+    "changing tabs moves the native disabled-button state")
 OU.UI.input:SetText("Need the event layer")
 OU.UI.composeButton.scripts.OnClick()
 assert(next(OU.Runtime.layers), "Layers composer remains usable")
@@ -171,9 +175,12 @@ assert(OU.UI.rows[1].body.text:find("agreed", 1, true)
     and OU.UI.rows[1].body.text:find("configured", 1, true)
     and OU.UI.rows[1].body.text:find("not because", 1, true),
     "People explains the bounded manual connector-trust boundary without claiming verified identity")
+assert(OU.UI.composeButton.text == "Add connector", "People uses an action-specific connector label")
 OU.UI.input:SetText("Athena-Forever")
 OU.UI.composeButton.scripts.OnClick()
 assert(OU.DB.bridges["athena-forever"], "People connector composer remains usable")
+assert(OU.UI.status.text:find("1 link", 1, true) and not OU.UI.status.text:find("1 links", 1, true)
+    and OU.UI.rows[1].meta.text:find("1 link", 1, true), "one guild connector uses singular player-facing copy")
 assert(OU.UI.rows[1].action:IsShown(), "People linking control remains visible")
 OU.UI.rows[1].action.scripts.OnClick()
 assert(OU.DB.bridgeMode, "People linking control remains clickable")
@@ -263,6 +270,7 @@ assert(OU.UI.rows[1].body.text == "150 members" and OU.UI.rows[1].count.text == 
 assert(OU.UI.rows[3].heading.text == "Olympus I" and OU.UI.rows[4].heading.text == "Olympus II"
     and OU.UI.rows[5].heading.text == "Olympus III" and OU.UI.rows[6].heading.text == "Olympus IV",
     "guild ledger uses hierarchy order")
+assert(OU.UI.rows[3].chevron.text == "+", "Census uses a plain-text expand marker without emoji glyphs")
 assert(OU.UI.rows[3].body.text:find("Fresh", 1, true) and OU.UI.rows[4].body.text:find("Stale", 1, true)
     and OU.UI.rows[5].body.text:find("Expired", 1, true), "fresh, stale, and expired states are explicit")
 assert(OU.UI.rows[4].count.text:find("— online", 1, true) and OU.UI.rows[6].count.text == "0 members • 0 online",
@@ -270,6 +278,7 @@ assert(OU.UI.rows[4].count.text:find("— online", 1, true) and OU.UI.rows[6].co
 OU.UI.rows[3].scripts.OnMouseDown()
 assert(#sent == beforeOpenTraffic and OU.UI.rows[3].action.text == "Load member list",
     "expanding a guild never fetches automatically and exposes one explicit action")
+assert(OU.UI.rows[3].chevron.text == "-", "expanded Census rows use a plain-text collapse marker")
 OU.UI.rows[3].action.scripts.OnClick()
 assert(#sent == beforeOpenTraffic + 1, "Load member list emits exactly one request")
 local requestId

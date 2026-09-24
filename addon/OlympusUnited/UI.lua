@@ -242,7 +242,13 @@ local function PeopleRows()
     SetColor(network.heading, P.COLORS.gold)
     network.body:SetText(L.LINK_HELP)
     local linkCount = OU.Util.Count(OU.DB.bridges)
-    network.meta:SetText((OU.DB.bridgeMode and L.LINK_STATUS_ON or L.LINK_STATUS_OFF):format(linkCount))
+    local linkStatus
+    if OU.DB.bridgeMode then
+        linkStatus = linkCount == 1 and L.LINK_STATUS_ON_ONE or L.LINK_STATUS_ON_MANY:format(linkCount)
+    else
+        linkStatus = linkCount == 1 and L.LINK_STATUS_OFF_ONE or L.LINK_STATUS_OFF_MANY:format(linkCount)
+    end
+    network.meta:SetText(linkStatus)
     network.action:SetText(OU.DB.bridgeMode and L.BUTTON_STOP_LINKING or L.BUTTON_START_LINKING)
     network.action:SetPoint("BOTTOMRIGHT", network, "BOTTOMRIGHT", -8, 7)
     network.action:SetScript("OnClick", function()
@@ -511,7 +517,7 @@ local function CensusRows()
     index = index + 1
     for _, entry in ipairs(totals.rows) do
         local row, summary = GetRow(index), entry.summary
-        row.chevron:SetText(UI.expandedGuild == entry.key and "▼" or "▶")
+        row.chevron:SetText(UI.expandedGuild == entry.key and "-" or "+")
         row.chevron:Show()
         row.heading:SetPoint("TOPLEFT", row, "TOPLEFT", 24, -7)
         row.heading:SetText(summary.guildDisplay)
@@ -554,7 +560,7 @@ end
 local function SetTab(tab)
     local changed = UI.activeTab ~= tab
     UI.activeTab = tab
-    for name, button in pairs(UI.tabs) do button.activeLine:SetShown(name == tab) end
+    for name, button in pairs(UI.tabs) do button:SetEnabled(name ~= tab) end
     if changed and UI.input then UI.input:SetText("") end
     OU.RefreshUI()
 end
@@ -652,11 +658,6 @@ function OU.CreateUI()
         local button = P.Button(frame, text, 130, 24, function() SetTab(name) end)
         P.Tip(button, text, tooltip)
         if previous then button:SetPoint("LEFT", previous, "RIGHT", 8, 0) else button:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -90) end
-        button.activeLine = button:CreateTexture(nil, "ARTWORK")
-        button.activeLine:SetPoint("BOTTOMLEFT", button, "BOTTOMLEFT", 5, 2)
-        button.activeLine:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", -5, 2)
-        button.activeLine:SetHeight(2)
-        button.activeLine:SetColorTexture(unpack(P.COLORS.gold))
         UI.tabs[name] = button
         previous = button
     end

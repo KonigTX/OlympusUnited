@@ -71,4 +71,18 @@ assert(OU.GuildRoster.Request(function(value) callbackResult = value end))
 timers[#timers].callback()
 assert(callbackResult and callbackResult.reason == "timeout", "timeout returns a typed unavailable result")
 
+C_Club.GetClubInfo = function() return { name = "Olympus I", memberCount = 3 } end
+callbackResult = nil
+timers = {}
+assert(OU.GuildRoster.Request(function(value) callbackResult = value end))
+assert(OU.GuildRoster.OnEvent("GUILD_ROSTER_UPDATE") and callbackResult == nil,
+    "a partial first roster event remains pending instead of showing a false failure")
+local retryTimer
+for _, timer in ipairs(timers) do if timer.delay == 1 then retryTimer = timer end end
+assert(retryTimer, "a partial roster schedules one bounded retry")
+C_Club.GetClubInfo = function() return { name = "Olympus I", memberCount = 2 } end
+retryTimer.callback()
+assert(callbackResult and callbackResult.ok and callbackResult.total == 2,
+    "the bounded retry completes once WoW finishes preparing the roster")
+
 print("Olympus United guild roster tests passed")

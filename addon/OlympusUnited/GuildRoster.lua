@@ -3,6 +3,17 @@ local _, OU = ...
 local Roster = { pending = nil }
 OU.GuildRoster = Roster
 
+local TRANSIENT_FAILURES = {
+    ["clubs-unavailable"] = true,
+    ["club-info"] = true,
+    ["club-shape"] = true,
+    ["member-list"] = true,
+    ["member-info"] = true,
+    ["count-mismatch"] = true,
+    ["duplicate-name"] = true,
+}
+local MAX_RETRIES = 4
+
 local REQUIRED = {
     { "C_GuildInfo", "GuildRoster" },
     { "C_Club", "GetGuildClubId" },
@@ -95,17 +106,48 @@ local function Finish(token, result)
     callback(result)
 end
 
+local ScheduleRetry
+local function Retry(token)
+    local pending = Roster.pending
+    if not pending or pending.token ~= token then return end
+    pending.retryScheduled = false
+    if pending.retries >= MAX_RETRIES or OU.Util.Uptime() - pending.startedAt >= 9 then return end
+    pending.retries = pending.retries + 1
+    pcall(C_GuildInfo.GuildRoster)
+    local result = Roster.ReadComplete()
+    if result.ok then
+        Finish(token, result)
+    elseif TRANSIENT_FAILURES[result.reason] then
+        pending.lastReason = result.reason
+        ScheduleRetry(token)
+    else
+        Finish(token, result)
+    end
+end
+
+ScheduleRetry = function(token)
+    local pending = Roster.pending
+    if not pending or pending.token ~= token or pending.retryScheduled or not (C_Timer and C_Timer.After) then return false end
+    pending.retryScheduled = true
+    C_Timer.After(1, function() Retry(token) end)
+    return true
+end
+
 function Roster.Request(callback)
     if type(callback) ~= "function" then return false, "callback-required" end
     if Roster.pending then return false, "busy" end
     local capable, reason = Roster.Capabilities()
     if not capable then callback({ ok = false, reason = reason }); return false, reason end
     local token = OU.Util.MakeID("roster")
-    Roster.pending = { token = token, callback = callback, startedAt = OU.Util.Uptime() }
+    Roster.pending = { token = token, callback = callback, startedAt = OU.Util.Uptime(), retries = 0 }
     local ok = pcall(C_GuildInfo.GuildRoster)
     if not ok then Finish(token, { ok = false, reason = "request-failed" }); return false, "request-failed" end
     if C_Timer and C_Timer.After then
-        C_Timer.After(10, function() Finish(token, { ok = false, reason = "timeout" }) end)
+        C_Timer.After(10, function()
+            local pending = Roster.pending
+            local reason = pending and pending.token == token and pending.lastReason or "timeout"
+            Finish(token, { ok = false, reason = reason or "timeout" })
+        end)
     end
     return true
 end
@@ -113,8 +155,16 @@ end
 function Roster.OnEvent(event)
     if event ~= "GUILD_ROSTER_UPDATE" or not Roster.pending then return false end
     local token = Roster.pending.token
-    Finish(token, Roster.ReadComplete())
+    local result = Roster.ReadComplete()
+    if result.ok then
+        Finish(token, result)
+    elseif TRANSIENT_FAILURES[result.reason] then
+        Roster.pending.lastReason = result.reason
+        if not ScheduleRetry(token) then Finish(token, result) end
+    else
+        Finish(token, result)
+    end
     return true
 end
 
-Roster._Test = { PresenceKind = PresenceKind, Finish = Finish }
+Roster._Test = { PresenceKind = PresenceKind, Finish = Finish, TransientFailures = TRANSIENT_FAILURES }

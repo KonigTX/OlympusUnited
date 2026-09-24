@@ -32,7 +32,7 @@ def verify_manifest() -> None:
     toc_text = TOC.read_text(encoding="utf-8-sig")
     assert "## Interface: 16001, 16000" in toc_text
     assert "## SavedVariables: OlympusUnitedDB" in toc_text
-    assert "## Version: 0.5.0" in toc_text
+    assert "## Version: 0.6.0" in toc_text
     assert "## Author: KonigTX" in toc_text and "Konigtx" not in toc_text
     assert "## X-Curse-Project-ID: 1709990" in toc_text
     assert (ADDON / "Media" / "OlympusLogo.tga").is_file()
@@ -158,7 +158,7 @@ def verify_archive() -> Path | None:
     with ZipFile(archive_path) as archive:
         infos = archive.infolist()
         names = [info.filename for info in infos]
-        assert names == sorted(names, key=lambda value: (value.lower(), value)), "archive entries are not deterministically sorted"
+        assert names == sorted(names), "archive entries are not unique ordinal order"
         assert set(names) == expected_archive_files(), "archive file set differs from the release boundary"
         assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in infos), "archive timestamps are not fixed"
         for info in infos:

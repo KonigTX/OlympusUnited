@@ -1,2 +1,6 @@
 dist/
 docs/context/
+# Generated into the junctioned live addon only by scripts/package.ps1 -InstallPath.
+addon/OlympusUnited/README.md
+addon/OlympusUnited/CHANGELOG.md
+addon/OlympusUnited/LICENSE.txt

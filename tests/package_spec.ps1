@@ -42,8 +42,8 @@ function Copy-DeclaredInputs([string]$DestinationRoot) {
 function Invoke-IsolatedPackage([string]$Shell, [string]$Root) {
     & $Shell -NoProfile -File (Join-Path $Root "scripts\package.ps1") | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$Shell package build failed with exit $LASTEXITCODE" }
-    $archive = Join-Path $Root "dist\OlympusUnited-0.5.0.zip"
-    $sidecar = Join-Path $Root "dist\OlympusUnited-0.5.0.sha256"
+    $archive = Join-Path $Root "dist\OlympusUnited-0.6.0.zip"
+    $sidecar = Join-Path $Root "dist\OlympusUnited-0.6.0.sha256"
     if (-not (Test-Path -LiteralPath $archive -PathType Leaf) -or -not (Test-Path -LiteralPath $sidecar -PathType Leaf)) {
         throw "$Shell did not produce the isolated archive and sidecar"
     }
