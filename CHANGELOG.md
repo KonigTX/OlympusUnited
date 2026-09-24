@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Corrected public author metadata to the exact `KonigTX` spelling and made isolated packages byte-identical across supported PowerShell runtimes with a canonical stored ZIP format.
+- Rebuilt SavedVariables through an explicit typed schema migration that removes unknown keys, repairs unsafe window values, and caps every saved map.
+- Replaced substring guild membership with one exact local allowlist. Exact `OLYMPUS` is the pinned root; all other Olympus-like names are untrusted candidates until approved.
+- Added discover-never-auto-trust guild review for locally verified exact-`OLYMPUS` leaders and officers, including Approve, Deny, Reconsider, suppression, bounded evidence, and fail-closed conflict handling.
+- Added manual connector propagation for guild trust choices without claiming cryptographic or remote officer identity; stale, replayed, malformed, forked, and out-of-order choices are rejected or conflicted closed.
+- Bound every general relayed message to its observed transport sender while retaining the origin as displayed author, and added layered origin, connector, type, receiver-wide, forwarding, dedupe, and memory limits.
+- Added hard caps and expiry pruning across runtime, Census, chat guard, recruiting, routing, and requested-roster collections without saving chat contents or Census names.
+- Removed four unproven legacy API fallbacks and kept only exact-build-supported chat, invite, and filter paths.
+- Expanded adversarial regression coverage for migration, exact guild trust, governance authority and routing, caps/expiry, relay admission, UI gating, and cross-runtime packages.
+
 ## 0.5.0 - 2026-09-24
 
 - Added an opt-in chat guard that hides public chat and incoming whispers from players WoW has recently confirmed belong to a non-Olympus guild.

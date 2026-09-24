@@ -33,10 +33,6 @@ function Network.RegisterPrefix()
         local ok, result = pcall(C_ChatInfo.RegisterAddonMessagePrefix, OU.Protocol.PREFIX)
         return ok and result ~= false
     end
-    if RegisterAddonMessagePrefix then
-        local ok, result = pcall(RegisterAddonMessagePrefix, OU.Protocol.PREFIX)
-        return ok and result ~= false
-    end
     return false
 end
 
@@ -56,19 +52,16 @@ local function SendRaw(payload, distribution, target)
         local ok, result = pcall(C_ChatInfo.SendAddonMessage, OU.Protocol.PREFIX, payload, distribution, target)
         return ResultSucceeded(ok, result), result
     end
-    if SendAddonMessage then
-        local ok, result = pcall(SendAddonMessage, OU.Protocol.PREFIX, payload, distribution, target)
-        return ResultSucceeded(ok, result), result
-    end
     return false, L.ERROR_ADDON_CHAT
 end
 
-local function SendToBridges(payload, exceptSender)
+local function SendToBridges(payload, exceptSender, budgeted)
     local sent = false
     local exceptKey = BridgeKey(exceptSender)
     for key, displayName in pairs(OU.DB.bridges or {}) do
         if key ~= exceptKey and not IsSelf(displayName) then
-            local ok = SendRaw(payload, "WHISPER", displayName)
+            local ok = not budgeted or OU.State.ForwardAllowed(OU.Runtime, OU.Util.Now())
+            if ok then ok = SendRaw(payload, "WHISPER", displayName) end
             sent = ok or sent
         end
     end
@@ -95,13 +88,13 @@ local function Forward(message, transportSender, distribution)
     if not payload then return end
 
     if distribution == "GUILD" then
-        SendToBridges(payload, transportSender)
+        SendToBridges(payload, transportSender, true)
     elseif distribution == "WHISPER" and IsTrustedBridge(transportSender) then
-        if IsInGuild and IsInGuild() then SendRaw(payload, "GUILD") end
+        if IsInGuild and IsInGuild() and OU.State.ForwardAllowed(OU.Runtime, OU.Util.Now()) then SendRaw(payload, "GUILD") end
         -- A hop-one summary has reached its destination connector. Its only
         -- legal next leg is the final guild broadcast at hop two.
         if message.type ~= "CSUM" or message.hops == 0 then
-            SendToBridges(payload, transportSender)
+            SendToBridges(payload, transportSender, true)
         end
     end
 end
@@ -151,19 +144,16 @@ function Network.SendDirectedReply(route, messageType, id, fields, origin)
 end
 
 function Network.AddBridge(name)
+    if not OU.Util.IsPlainString(name) then return false, L.ERROR_CONNECTOR_NAME end
     name = OU.Util.SanitizeText(name, 64)
     local key = BridgeKey(name)
     if not key then return false, L.ERROR_CONNECTOR_NAME end
     if IsSelf(name) then return false, L.ERROR_CONNECTOR_SELF end
-    OU.DB.bridges[key] = name
-    return true
+    return OU.State.AddBridge(OU.DB, name)
 end
 
 function Network.RemoveBridge(name)
-    local key = BridgeKey(name)
-    if not key or not OU.DB.bridges[key] then return false, L.ERROR_CONNECTOR_MISSING end
-    OU.DB.bridges[key] = nil
-    return true
+    return OU.State.RemoveBridge(OU.DB, name)
 end
 
 function Network.SetBridgeMode(enabled)
@@ -218,8 +208,6 @@ function Network.OfferLayer(requestID, note)
     if sent then
         if C_PartyInfo and C_PartyInfo.InviteUnit then
             pcall(C_PartyInfo.InviteUnit, request.sender)
-        elseif InviteUnit then
-            pcall(InviteUnit, request.sender)
         end
     end
     return sent, err
@@ -261,23 +249,106 @@ local function SameName(left, right)
     return a ~= nil and a == b
 end
 
-local function PostDeclaresOlympusMember(message)
-    return message.fields[2] == "member" and OU.Util.IsOlympusGuild(message.fields[3])
+local GENERAL_TYPES = {
+    HELLO = true, POST = true, LREQ = true, LOFFER = true, EVENT = true, CLAIM = true, RELEASE = true,
+}
+
+local function ConnectorInboundAllowed(message, distribution, transportSender)
+    if not IsTrustedBridge(transportSender) then return false end
+    if distribution == "WHISPER" then return message.hops >= 0 and message.hops <= 2 end
+    return distribution == "GUILD" and (message.hops == 1 or message.hops == 2)
 end
 
-local function PostInboundAllowed(message, distribution, transportSender)
-    local identity = OU.Identity or OU.Util.PlayerIdentity()
-    if not IsOlympusMember(identity) then return false end
-    if distribution == "GUILD" and message.hops == 0 then
-        return SameName(message.origin, transportSender)
+local function DeclaredGuild(message)
+    if message.type == "HELLO" then return message.fields[2] end
+    if message.type == "POST" then return message.fields[3] end
+    if message.type == "CCAND" or message.type == "CSUM" then
+        if OU.Util.NormalizeGuild(message.fields[1]) == OU.Util.NormalizeGuild(message.fields[2]) then
+            return message.fields[2]
+        end
+        return nil
     end
-    if not PostDeclaresOlympusMember(message) then return false end
-    if distribution == "GUILD" then return message.hops == 1 or message.hops == 2 end
-    return distribution == "WHISPER" and IsTrustedBridge(transportSender)
+    if message.type == "CLEASE" or message.type == "CREQ" then return message.fields[1 + (message.type == "CREQ" and 1 or 0)] end
+    return nil
+end
+
+local function ObserveConfiguredCandidate(message, distribution, transportSender, now)
+    if not OU.GuildTrust or not ConnectorInboundAllowed(message, distribution, transportSender) then return false end
+    local guild = DeclaredGuild(message)
+    if not guild then return false end
+    local observed = OU.GuildTrust.Observe(guild, "configured-connector", now, OU.DB)
+    if observed and OU.RefreshUI then OU.RefreshUI() end
+    return observed
+end
+
+local function GeneralInboundAllowed(message, distribution, transportSender)
+    if not GENERAL_TYPES[message.type] then return false end
+    local allowed
+    if distribution == "GUILD" and message.hops == 0 then
+        allowed = SameName(message.origin, transportSender)
+    elseif distribution == "GUILD" and (message.hops == 1 or message.hops == 2) then
+        allowed = IsTrustedBridge(transportSender)
+    elseif distribution == "WHISPER" and message.hops >= 0 and message.hops <= 2 then
+        allowed = IsTrustedBridge(transportSender)
+    else
+        allowed = false
+    end
+    if not allowed then return false end
+    if message.type == "POST" then
+        local identity = OU.Identity or OU.Util.PlayerIdentity()
+        return IsOlympusMember(identity) and message.fields[2] == "member"
+            and OU.Util.IsParticipatingGuild(message.fields[3])
+    elseif message.type == "HELLO" and message.fields[1] == "member" then
+        return OU.Util.IsParticipatingGuild(message.fields[2])
+    end
+    return true
+end
+
+local function GovernanceInboundAllowed(message, distribution, transportSender)
+    return message.type == "GDEC" and ConnectorInboundAllowed(message, distribution, transportSender)
+end
+
+local function ForwardGovernance(message, transportSender, distribution, now)
+    if not OU.DB.bridgeMode or message.hops >= 2 then return false end
+    local payload = OU.Protocol.Encode(message.type, message.id, message.fields, message.origin, message.hops + 1)
+    if not payload then return false end
+    local sent = false
+    if distribution == "GUILD" then
+        sent = SendToBridges(payload, transportSender, true)
+    elseif distribution == "WHISPER" and IsTrustedBridge(transportSender) then
+        if IsInGuild and IsInGuild() and OU.State.ForwardAllowed(OU.Runtime, now) then
+            sent = SendRaw(payload, "GUILD") or sent
+        end
+        sent = SendToBridges(payload, transportSender, true) or sent
+    end
+    return sent
+end
+
+function Network.SendGuildDecision(decision)
+    local messageType, id, fields, origin = OU.Protocol.GuildDecision(decision)
+    if not messageType then return false, id end
+    local payload, err = Encode(messageType, id, fields, origin, 0)
+    if not payload then return false, err end
+    local sent = SendToBridges(payload, nil, true)
+    return sent, sent and nil or L.ERROR_NO_ROUTE
+end
+
+function Network.OnGuildTrustChanged(wasLocalParticipant, now)
+    now = now or OU.Util.Now()
+    OU.Identity = OU.Util.PlayerIdentity()
+    if OU.ChatGuard and OU.ChatGuard.OnGuildTrustChanged then OU.ChatGuard.OnGuildTrustChanged(OU.DB, now) end
+    if OU.Runtime then OU.State.Prune(OU.Runtime, now) end
+    local isLocalParticipant = OU.Util.IsParticipatingGuild(OU.Identity.guild)
+    if wasLocalParticipant ~= isLocalParticipant and OU.Census and OU.Census.OnGuildChanged then
+        OU.Census.OnGuildChanged()
+    end
+    if OU.RefreshUI then OU.RefreshUI() end
+    return isLocalParticipant
 end
 
 local function LocalGuildKey()
     local identity = OU.Identity or OU.Util.PlayerIdentity()
+    if not OU.Util.IsParticipatingGuild(identity.guild) then return nil end
     return OU.Util.NormalizeGuild(identity.guild)
 end
 
@@ -287,6 +358,7 @@ local function GuildOnlyElection(message, distribution, transportSender)
 end
 
 local function RequestInboundAllowed(message, distribution, transportSender)
+    if not OU.Util.IsParticipatingGuild(message.fields[2]) then return false end
     if distribution == "GUILD" then
         if message.hops == 0 then return SameName(message.origin, transportSender) end
         return message.hops == 2 and IsTrustedBridge(transportSender)
@@ -297,7 +369,7 @@ end
 
 local function SummaryInboundAllowed(message, distribution, transportSender)
     local guildKey = OU.Util.NormalizeGuild(message.fields[1])
-    if not guildKey then return false end
+    if not guildKey or not OU.Util.IsParticipatingGuild(message.fields[2]) then return false end
     if distribution == "GUILD" and message.hops == 0 then
         return guildKey == LocalGuildKey() and SameName(message.origin, transportSender)
     end
@@ -328,7 +400,7 @@ local function ForwardRequest(message, transportSender, distribution, now)
         local route = { role = "reporter", requestId = requestId, guildKey = guildKey, requester = message.origin,
             reporter = targetReporter, upstream = UpstreamLeg(distribution, transportSender),
             acceptedInbound = UpstreamLeg(distribution, transportSender), expiresAt = now + OU.CensusLogic.CONSTANTS.ROUTE_TTL }
-        runtime.census.routes[requestId] = route
+        if not OU.Census.AdmitRoute(runtime, requestId, route, now) then return nil, "route capacity" end
         return OU.Census.HandleRequest(runtime, route, message, now)
     end
 
@@ -340,18 +412,20 @@ local function ForwardRequest(message, transportSender, distribution, now)
     local route = { role = "intermediary", requestId = requestId, guildKey = guildKey, requester = message.origin,
         reporter = targetReporter, upstream = UpstreamLeg(distribution, transportSender),
         expiresAt = now + OU.CensusLogic.CONSTANTS.ROUTE_TTL }
+    if not OU.Census.AdmitRoute(runtime, requestId, route, now) then return nil, "route capacity" end
     local sent = false
     if distribution == "GUILD" then
         route.downstream = { distribution = "WHISPER", senders = {} }
         for _, target in ipairs(BridgeTargets(transportSender)) do
             route.downstream.senders[OU.Util.NormalizeName(target)] = true
-            sent = SendRaw(payload, "WHISPER", target) or sent
+            if OU.State.ForwardAllowed(runtime, now) then sent = SendRaw(payload, "WHISPER", target) or sent end
         end
     elseif distribution == "WHISPER" and IsTrustedBridge(transportSender) and IsInGuild and IsInGuild() then
         route.downstream = { distribution = "GUILD", sender = targetReporter }
-        sent = SendRaw(payload, "GUILD")
+        if OU.State.ForwardAllowed(runtime, now) then sent = SendRaw(payload, "GUILD") end
     end
-    if sent then runtime.census.routes[requestId] = route; return { kind = "census-route", value = route } end
+    if sent then return { kind = "census-route", value = route } end
+    runtime.census.routes[requestId] = nil
     return nil, "no directed route"
 end
 
@@ -359,12 +433,19 @@ local function PageRateAllowed(runtime, sender, requestId, now)
     local key = (OU.Util.NormalizeName(sender) or tostring(sender):lower()) .. "|" .. requestId
     local bucket = runtime.census.pageRate[key]
     if not bucket then
-        bucket = { tokens = 8, last = now, windowStart = now, windowCount = 0, total = 0 }
+        for oldKey, old in pairs(runtime.census.pageRate) do
+            if type(old) ~= "table" or now - (old.lastTouched or old.last or 0) > OU.CensusLogic.CONSTANTS.PAGE_RATE_TTL
+                or not runtime.census.routes[old.requestId] then runtime.census.pageRate[oldKey] = nil end
+        end
+        if OU.Util.Count(runtime.census.pageRate) >= OU.CensusLogic.CONSTANTS.MAX_PAGE_RATE then return false end
+        bucket = { tokens = 8, last = now, lastTouched = now, windowStart = now, windowCount = 0,
+            total = 0, requestId = requestId }
         runtime.census.pageRate[key] = bucket
     end
     local elapsed = math.max(0, now - bucket.last)
     bucket.tokens = math.min(8, bucket.tokens + elapsed * 5)
     bucket.last = now
+    bucket.lastTouched = now
     if now - bucket.windowStart >= 10 then bucket.windowStart, bucket.windowCount = now, 0 end
     if bucket.tokens < 1 or bucket.windowCount >= 60 or bucket.total >= 1000 then return false end
     bucket.tokens = bucket.tokens - 1
@@ -385,6 +466,7 @@ local function ForwardReply(route, message)
     if message.hops >= 2 then return false end
     local payload = OU.Protocol.Encode(message.type, message.id, message.fields, message.origin, message.hops + 1)
     if not payload then return false end
+    if not OU.State.ForwardAllowed(OU.Runtime, OU.Util.Now()) then return false end
     if route.upstream.distribution == "GUILD" then return SendRaw(payload, "GUILD") end
     return SendRaw(payload, "WHISPER", route.upstream.sender)
 end
@@ -396,9 +478,12 @@ local function HandleReply(message, transportSender, distribution, now)
     if route.role == "intermediary" then
         if route.terminal then return nil end
         if not DownstreamMatches(route, distribution, transportSender) then return nil end
-        if distribution == "WHISPER" and not route.lockedDownstream then route.lockedDownstream = OU.Util.NormalizeName(transportSender) end
         if route.lockedDownstream and distribution == "WHISPER" and route.lockedDownstream ~= OU.Util.NormalizeName(transportSender) then return nil end
-        if OU.State.Seen(OU.Runtime, message.origin, message.id, now) then return nil end
+        local context = { origin = message.origin, transportSender = transportSender,
+            distribution = distribution, hops = message.hops }
+        local admitted = OU.State.AdmitInbound(OU.Runtime, context, message, now)
+        if not admitted then return nil end
+        if distribution == "WHISPER" and not route.lockedDownstream then route.lockedDownstream = OU.Util.NormalizeName(transportSender) end
         if message.type == "CPAGE" and not PageRateAllowed(OU.Runtime, transportSender, requestId, now) then return nil end
         if not ForwardReply(route, message) then return nil end
         if message.type == "CFAIL" then route.terminal = true end
@@ -415,7 +500,10 @@ local function HandleReply(message, transportSender, distribution, now)
             if not senderKey or (route.lockedGuildSender and route.lockedGuildSender ~= senderKey) then return nil end
             route.lockedGuildSender = route.lockedGuildSender or senderKey
         end
-        if OU.State.Seen(OU.Runtime, message.origin, message.id, now) then return nil end
+        local context = { origin = message.origin, transportSender = transportSender,
+            distribution = distribution, hops = message.hops }
+        local admitted = OU.State.AdmitInbound(OU.Runtime, context, message, now)
+        if not admitted then return nil end
         if message.type == "CPAGE" and not PageRateAllowed(OU.Runtime, transportSender, requestId, now) then return nil end
         if message.type == "CPAGE" then
             local change = OU.Census.ReceivePage(OU.Runtime, message, now)
@@ -436,15 +524,34 @@ function Network.OnAddonMessage(prefix, payload, distribution, transportSender)
     if not message then return end
 
     local now = OU.Util.Now()
+    local context = { origin = message.origin, transportSender = transportSender,
+        distribution = distribution, hops = message.hops }
+    ObserveConfiguredCandidate(message, distribution, transportSender, now)
+    if message.type == "GDEC" then
+        if not GovernanceInboundAllowed(message, distribution, transportSender) then return end
+        if not OU.State.AdmitInbound(OU.Runtime, context, message, now) then return end
+        local wasLocalParticipant = OU.Identity and OU.Util.IsParticipatingGuild(OU.Identity.guild) or false
+        local changed, reason
+        if OU.GuildTrust then changed, reason = OU.GuildTrust.ApplyRemote(message, now, OU.DB) end
+        if not changed then
+            if reason == "decision-conflict" then Network.OnGuildTrustChanged(wasLocalParticipant, now) end
+            return
+        end
+        ForwardGovernance(message, transportSender, distribution, now)
+        Network.OnGuildTrustChanged(wasLocalParticipant, now)
+        return
+    end
     if message.type == "CCAND" or message.type == "CLEASE" then
         if not GuildOnlyElection(message, distribution, transportSender) then return end
-        local change = OU.State.Apply(OU.Runtime, transportSender, message, now)
+        if not OU.State.AdmitInbound(OU.Runtime, context, message, now) then return end
+        local change = OU.State.Apply(OU.Runtime, transportSender, message, now, context, true)
         if change and OU.OnNetworkChange then OU.OnNetworkChange(change, distribution) end
         return
     end
     if message.type == "CSUM" then
         if not SummaryInboundAllowed(message, distribution, transportSender) then return end
-        local change = OU.State.Apply(OU.Runtime, transportSender, message, now)
+        if not OU.State.AdmitInbound(OU.Runtime, context, message, now) then return end
+        local change = OU.State.Apply(OU.Runtime, transportSender, message, now, context, true)
         if not change then return end
         Forward(message, transportSender, distribution)
         if OU.OnNetworkChange then OU.OnNetworkChange(change, distribution) end
@@ -452,9 +559,7 @@ function Network.OnAddonMessage(prefix, payload, distribution, transportSender)
     end
     if message.type == "CREQ" then
         if not RequestInboundAllowed(message, distribution, transportSender) then return end
-        if OU.State.Seen(OU.Runtime, message.origin, message.id, now) then return end
-        local allowed = OU.State.RateAllowed(OU.Runtime, transportSender, message.type, now)
-        if not allowed then return end
+        if not OU.State.AdmitInbound(OU.Runtime, context, message, now) then return end
         local change = ForwardRequest(message, transportSender, distribution, now)
         if change and OU.OnNetworkChange then OU.OnNetworkChange(change, distribution) end
         return
@@ -465,11 +570,9 @@ function Network.OnAddonMessage(prefix, payload, distribution, transportSender)
         return
     end
 
-    if message.type == "POST" and not PostInboundAllowed(message, distribution, transportSender) then return end
-
-    if message.hops == 0 then message.origin = transportSender end
-    local author = message.origin
-    local change = OU.State.Apply(OU.Runtime, author, message, now)
+    if not GeneralInboundAllowed(message, distribution, transportSender) then return end
+    if not OU.State.AdmitInbound(OU.Runtime, context, message, now) then return end
+    local change = OU.State.Apply(OU.Runtime, message.origin, message, now, context, true)
     if not change then return end
 
     Forward(message, transportSender, distribution)
@@ -487,5 +590,11 @@ Network._Test = {
     HandleReply = HandleReply,
     PageRateAllowed = PageRateAllowed,
     BridgeTargets = BridgeTargets,
-    PostInboundAllowed = PostInboundAllowed,
+    GeneralInboundAllowed = GeneralInboundAllowed,
+    PostInboundAllowed = GeneralInboundAllowed,
+    ConnectorInboundAllowed = ConnectorInboundAllowed,
+    GovernanceInboundAllowed = GovernanceInboundAllowed,
+    ObserveConfiguredCandidate = ObserveConfiguredCandidate,
+    DeclaredGuild = DeclaredGuild,
+    ForwardGovernance = ForwardGovernance,
 }

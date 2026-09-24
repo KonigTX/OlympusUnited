@@ -42,11 +42,24 @@ assert(loadfile(root .. "/addon/OlympusUnited/CensusLogic.lua"))("OlympusUnited"
 assert(loadfile(root .. "/addon/OlympusUnited/Strings.lua"))("OlympusUnited", OU)
 assert(loadfile(root .. "/addon/OlympusUnited/Protocol.lua"))("OlympusUnited", OU)
 assert(loadfile(root .. "/addon/OlympusUnited/State.lua"))("OlympusUnited", OU)
+assert(loadfile(root .. "/addon/OlympusUnited/GuildTrust.lua"))("OlympusUnited", OU)
 assert(loadfile(root .. "/addon/OlympusUnited/Network.lua"))("OlympusUnited", OU)
 assert(loadfile(root .. "/addon/OlympusUnited/Census.lua"))("OlympusUnited", OU)
 assert(loadfile(root .. "/addon/OlympusUnited/Core.lua"))("OlympusUnited", OU)
 
-OU.DB = OU.State.EnsureDatabase({})
+local function ApprovedGuilds(names)
+    local result = {}
+    for index, name in ipairs(names) do
+        local key = OU.Util.NormalizeGuild(name)
+        result[key] = { displayName = name, state = "approved", firstSeenAt = currentTime - 10,
+            lastSeenAt = currentTime, evidenceMask = 2, observations = 1, deniedEvidenceMask = 0,
+            generation = 1, decisionId = "g-fixture-" .. index .. "-" .. key:gsub(" ", "-"),
+            decidedAt = currentTime, sourceClass = "configured-connector" }
+    end
+    return result
+end
+
+OU.DB = OU.State.EnsureDatabase({ guildGovernance = ApprovedGuilds({ "Olympus I", "Olympus II" }) })
 OU.Runtime = OU.State.NewRuntime()
 OU.Identity = OU.Util.PlayerIdentity()
 
@@ -118,7 +131,9 @@ assert(#OU.Runtime.feed == 3, "unconfigured addon whispers should be rejected")
 local function node(name, guild, bridges, bridgeMode)
     return {
         identity = { name = name, guild = guild, role = "member" },
-        db = OU.State.EnsureDatabase({ bridges = bridges or {}, bridgeMode = bridgeMode and true or false }),
+        db = OU.State.EnsureDatabase({ bridges = bridges or {}, bridgeMode = bridgeMode and true or false,
+            guildGovernance = ApprovedGuilds({ "Olympus A", "Olympus B", "Olympus Direct" }),
+        }),
         runtime = OU.State.NewRuntime(),
     }
 end
@@ -137,6 +152,7 @@ reporter.runtime.census.localCapture = { state = "complete", guild = "Olympus B"
 
 local function useNode(value)
     OU.Identity, OU.DB, OU.Runtime = value.identity, value.db, value.runtime
+    currentGuild = value.identity.guild
 end
 local function lastSent()
     return sent[#sent], assert(OU.Protocol.Decode(sent[#sent].payload))
@@ -473,5 +489,279 @@ useNode(connectorA)
 local priorCandidates = OU.Util.Count(connectorA.runtime.census.candidates)
 OU.Network.OnAddonMessage("OLYUNITED", whisperedCandidate, "WHISPER", "RequesterA-Forever")
 assert(OU.Util.Count(connectorA.runtime.census.candidates) == priorCandidates, "election messages are guild-only and never forwarded")
+
+local function fieldsFor(messageType, stamp)
+    if messageType == "HELLO" then return { "member", "Olympus B", "Stormwind", 60, "WARRIOR" } end
+    if messageType == "POST" then return { "Message " .. stamp, "member", "Olympus B" } end
+    if messageType == "LREQ" then return { "Stormwind", "Need layer", currentTime + 600 } end
+    if messageType == "LOFFER" then return { "missing-request", "Invite sent" } end
+    if messageType == "EVENT" then return { currentTime + 900, "Event " .. stamp, "Details" } end
+    if messageType == "CLAIM" then return { "Target" .. stamp .. "-Forever", currentTime + 300 } end
+    return { "Target" .. stamp .. "-Forever" }
+end
+
+for _, messageType in ipairs({ "HELLO", "POST", "LREQ", "LOFFER", "EVENT", "CLAIM", "RELEASE" }) do
+    local receiver = node("Receiver-Forever", "Olympus A", {
+        ["connector-forever"] = "Connector-Forever",
+        ["secondconnector-forever"] = "SecondConnector-Forever",
+    }, true)
+    useNode(receiver)
+    currentTime = currentTime + 30
+    local changes = 0
+    OU.OnNetworkChange = function() changes = changes + 1 end
+
+    local direct = assert(OU.Protocol.Encode(messageType, "direct-" .. messageType,
+        fieldsFor(messageType, "direct"), "Direct-Forever", 0))
+    local before = #sent
+    OU.Network.OnAddonMessage("OLYUNITED", direct, "GUILD", "Direct-Forever")
+    assert(changes == 1 and #sent > before, messageType .. " direct guild traffic should mutate and forward")
+
+    local relayed = assert(OU.Protocol.Encode(messageType, "relay-" .. messageType,
+        fieldsFor(messageType, "relay"), "Remote-Forever", 1))
+    before = #sent
+    OU.Network.OnAddonMessage("OLYUNITED", relayed, "GUILD", "Connector-Forever")
+    assert(changes == 2 and #sent > before, messageType .. " configured guild relay should mutate and forward")
+
+    local unconfigured = assert(OU.Protocol.Encode(messageType, "unconfigured-" .. messageType,
+        fieldsFor(messageType, "unconfigured"), "Remote2-Forever", 1))
+    before = #sent
+    OU.Network.OnAddonMessage("OLYUNITED", unconfigured, "GUILD", "Untrusted-Forever")
+    OU.Network.OnAddonMessage("OLYUNITED", unconfigured, "WHISPER", "Untrusted-Forever")
+    assert(changes == 2 and #sent == before, messageType .. " must reject unconfigured guild and whisper relays")
+
+    local forged = assert(OU.Protocol.Encode(messageType, "forged-" .. messageType,
+        fieldsFor(messageType, "forged"), "Forged-Forever", 0))
+    OU.Network.OnAddonMessage("OLYUNITED", forged, "GUILD", "Ordinary-Forever")
+    assert(changes == 2, messageType .. " hop-zero origin must match the observed guild sender")
+end
+
+local duplicateReceiver = node("Receiver-Forever", "Olympus A", {
+    ["connector-forever"] = "Connector-Forever", ["secondconnector-forever"] = "SecondConnector-Forever",
+}, true)
+useNode(duplicateReceiver)
+currentTime = currentTime + 30
+local duplicateChanges = 0
+OU.OnNetworkChange = function() duplicateChanges = duplicateChanges + 1 end
+local duplicatePost = assert(OU.Protocol.Encode("POST", "canonical-duplicate",
+    { "One displayed message", "member", "Olympus B" }, "DisplayedAuthor-Forever", 1))
+OU.Network.OnAddonMessage("OLYUNITED", duplicatePost, "GUILD", "Connector-Forever")
+OU.Network.OnAddonMessage("OLYUNITED", duplicatePost, "GUILD", "SecondConnector-Forever")
+assert(duplicateChanges == 1 and #duplicateReceiver.runtime.feed == 1,
+    "the origin plus message-id key must converge duplicate paths")
+assert(duplicateReceiver.runtime.feed[1].sender == "DisplayedAuthor-Forever"
+    and duplicateReceiver.runtime.feed[1].transportSender == "Connector-Forever",
+    "origin remains the displayed author while transport remains diagnostic admission identity")
+
+local rotated = node("Receiver-Forever", "Olympus A", { ["connector-forever"] = "Connector-Forever" }, false)
+useNode(rotated)
+currentTime = currentTime + 30
+local rotatedChanges = 0
+OU.OnNetworkChange = function() rotatedChanges = rotatedChanges + 1 end
+for index = 1, 25 do
+    local payload = assert(OU.Protocol.Encode("POST", "rotated-id-" .. index,
+        { "Rotated " .. index, "member", "Olympus B" }, "Rotated" .. index .. "-Forever", 1))
+    OU.Network.OnAddonMessage("OLYUNITED", payload, "GUILD", "Connector-Forever")
+end
+assert(rotatedChanges == 20 and #rotated.runtime.feed == 20,
+    "rotating origins and ids through one connector must stop at the POST type budget")
+currentTime = currentTime + 11
+local recoveredPost = assert(OU.Protocol.Encode("POST", "rotated-recovered",
+    { "Recovered", "member", "Olympus B" }, "Recovered-Forever", 1))
+OU.Network.OnAddonMessage("OLYUNITED", recoveredPost, "GUILD", "Connector-Forever")
+assert(rotatedChanges == 21, "fixed receiver budgets must recover after the ten-second window")
+
+local originRotationRuntime = OU.State.NewRuntime()
+for index = 1, 100 do
+    local messageType = index <= 20 and "POST" or (index <= 60 and "HELLO" or "LREQ")
+    local message = { type = messageType, id = "transport-" .. index, origin = "Origin" .. index .. "-Forever",
+        hops = 1, fields = fieldsFor(messageType, "transport" .. index) }
+    OU.State.AdmitInbound(originRotationRuntime,
+        { transportSender = "OneConnector-Forever", distribution = "GUILD", hops = 1 }, message, currentTime)
+end
+assert(originRotationRuntime.transportRate["oneconnector-forever"].count == 80,
+    "one observed transport must have an 80-per-window ceiling despite rotated origins")
+
+local fanout = node("Receiver-Forever", "Olympus A", {}, true)
+for index = 1, OU.State.LIMITS.BRIDGES do
+    fanout.db.bridges["fanout" .. index .. "-forever"] = "Fanout" .. index .. "-Forever"
+end
+useNode(fanout)
+currentTime = currentTime + 30
+local fanoutChanges, fanoutBefore = 0, #sent
+OU.OnNetworkChange = function() fanoutChanges = fanoutChanges + 1 end
+for index = 1, 11 do
+    local origin = "Guildmate" .. index .. "-Forever"
+    local payload = assert(OU.Protocol.Encode("LREQ", "fanout-message-" .. index,
+        { "Stormwind", "Need layer", currentTime + 600 }, origin, 0))
+    OU.Network.OnAddonMessage("OLYUNITED", payload, "GUILD", origin)
+end
+assert(fanoutChanges == 11 and #sent - fanoutBefore == 160,
+    "connector fan-out must share one 160-delivery forwarding budget")
+
+local governanceReceiver = node("Receiver-Forever", "Olympus A", {
+    ["connector-forever"] = "Connector-Forever", ["secondconnector-forever"] = "SecondConnector-Forever",
+}, true)
+useNode(governanceReceiver)
+currentTime = currentTime + 30
+local candidatePost = assert(OU.Protocol.Encode("POST", "candidate-post",
+    { "This must not appear", "member", "Olympus Newcomers" }, "Candidate-Forever", 1))
+OU.Network.OnAddonMessage("OLYUNITED", candidatePost, "GUILD", "Connector-Forever")
+assert(governanceReceiver.db.guildGovernance["olympus newcomers"].state == "pending"
+    and not governanceReceiver.db.participatingGuilds["olympus newcomers"]
+    and #governanceReceiver.runtime.feed == 0,
+    "a configured declaration creates only an untrusted candidate and the triggering POST stays rejected")
+local untrustedCandidate = assert(OU.Protocol.Encode("HELLO", "candidate-untrusted",
+    { "member", "Olympus Untrusted", "Stormwind", 60, "WARRIOR" }, "Candidate2-Forever", 1))
+OU.Network.OnAddonMessage("OLYUNITED", untrustedCandidate, "GUILD", "Untrusted-Forever")
+assert(not governanceReceiver.db.guildGovernance["olympus untrusted"],
+    "an unconfigured sender cannot create even a side-band candidate")
+
+local function governancePayload(id, target, display, action, generation, previous, decidedAt, hops, origin)
+    return assert(OU.Protocol.Encode("GDEC", id,
+        { "olympus", target, display, action, generation, previous, decidedAt },
+        origin or "RemoteOfficer-Forever", hops or 1))
+end
+local illegalGuildZero = governancePayload("g-illegal-zero", "olympus zero", "Olympus Zero",
+    "approve", 1, "-", currentTime, 0)
+OU.Network.OnAddonMessage("OLYUNITED", illegalGuildZero, "GUILD", "Connector-Forever")
+assert(not governanceReceiver.db.guildGovernance["olympus zero"], "guild hop-zero governance is always rejected")
+local illegalWhisper = governancePayload("g-illegal-whisper", "olympus whisper", "Olympus Whisper",
+    "approve", 1, "-", currentTime, 0)
+OU.Network.OnAddonMessage("OLYUNITED", illegalWhisper, "WHISPER", "Untrusted-Forever")
+assert(not governanceReceiver.db.guildGovernance["olympus whisper"], "unconfigured governance whispers are rejected")
+
+local decisionTraffic = #sent
+local approvedDecision = governancePayload("g-network-1", "olympus governed", "Olympus Governed",
+    "approve", 1, "-", currentTime, 1, "DisplayedOfficer-Forever")
+OU.Network.OnAddonMessage("OLYUNITED", approvedDecision, "GUILD", "Connector-Forever")
+local governed = governanceReceiver.db.guildGovernance["olympus governed"]
+assert(governed and governed.state == "approved" and governanceReceiver.db.participatingGuilds["olympus governed"]
+    and governed.origin == nil and governed.transportSender == nil and #sent > decisionTraffic,
+    "configured governance preserves origin only in transit/diagnostics and persists no actor or connector identity")
+OU.Network.OnAddonMessage("OLYUNITED", approvedDecision, "GUILD", "SecondConnector-Forever")
+assert(governanceReceiver.db.guildGovernance["olympus governed"].decisionId == "g-network-1",
+    "canonical origin plus decision-id dedupe converges replay through another connector")
+
+governanceReceiver.runtime.census.summaries["olympus governed"] = { guildKey = "olympus governed",
+    guildDisplay = "Olympus Governed", capturedAt = currentTime, receivedAt = currentTime }
+local guardTrustPrunes = 0
+OU.ChatGuard = { OnGuildTrustChanged = function(database, at)
+    assert(database == governanceReceiver.db and at == currentTime,
+        "trust-change cache pruning should receive the current database and decision time")
+    guardTrustPrunes = guardTrustPrunes + 1
+end }
+currentTime = currentTime + 1
+local wrongPrevious = governancePayload("g-network-fork", "olympus governed", "Olympus Governed",
+    "deny", 2, "g-wrong", currentTime, 1)
+OU.Network.OnAddonMessage("OLYUNITED", wrongPrevious, "GUILD", "Connector-Forever")
+assert(governanceReceiver.db.guildGovernance["olympus governed"].state == "conflict"
+    and not governanceReceiver.db.participatingGuilds["olympus governed"]
+    and not governanceReceiver.runtime.census.summaries["olympus governed"] and guardTrustPrunes == 1,
+    "a predecessor fork fails closed and immediately prunes former participation state")
+OU.ChatGuard = nil
+local staleDecision = governancePayload("g-network-stale", "olympus stale", "Olympus Stale",
+    "approve", 1, "-", currentTime - 601, 1)
+OU.Network.OnAddonMessage("OLYUNITED", staleDecision, "GUILD", "Connector-Forever")
+assert(not governanceReceiver.db.guildGovernance["olympus stale"], "stale governance traffic cannot mutate trust")
+local futureDecision = governancePayload("g-network-future", "olympus future", "Olympus Future",
+    "approve", 1, "-", currentTime + 61, 1)
+OU.Network.OnAddonMessage("OLYUNITED", futureDecision, "GUILD", "Connector-Forever")
+assert(not governanceReceiver.db.guildGovernance["olympus future"], "future governance traffic cannot mutate trust")
+
+local governanceBudget = node("Receiver-Forever", "Olympus A", {
+    ["connector-forever"] = "Connector-Forever", ["secondconnector-forever"] = "SecondConnector-Forever",
+}, false)
+useNode(governanceBudget)
+currentTime = currentTime + 30
+local governanceBaseline = OU.Util.Count(governanceBudget.db.guildGovernance)
+for index = 1, 25 do
+    local payload = governancePayload("g-budget-" .. index, "olympus govern " .. index,
+        "Olympus Govern " .. index, "approve", 1, "-", currentTime, 1, "Origin" .. index .. "-Forever")
+    OU.Network.OnAddonMessage("OLYUNITED", payload, "GUILD",
+        index % 2 == 0 and "Connector-Forever" or "SecondConnector-Forever")
+end
+assert(OU.Util.Count(governanceBudget.db.guildGovernance) == governanceBaseline + 20,
+    "rotated origins and ids share the dedicated 20-per-window governance budget")
+currentTime = currentTime + 11
+local recoveredDecision = governancePayload("g-budget-recovered", "olympus recovered", "Olympus Recovered",
+    "approve", 1, "-", currentTime, 1)
+OU.Network.OnAddonMessage("OLYUNITED", recoveredDecision, "GUILD", "Connector-Forever")
+assert(governanceBudget.db.guildGovernance["olympus recovered"],
+    "governance admission recovers after the fixed ten-second window")
+
+local joining = node("Joining-Forever", "Olympus Joining", { ["connector-forever"] = "Connector-Forever" }, false)
+joining.identity.role, joining.db.guestMode = "guest", true
+useNode(joining)
+currentTime = currentTime + 30
+local censusChanges, originalGuildChange = 0, OU.Census.OnGuildChanged
+OU.Census.OnGuildChanged = function() censusChanges = censusChanges + 1 end
+local joiningDecision = governancePayload("g-joining", "olympus joining", "Olympus Joining",
+    "approve", 1, "-", currentTime, 1)
+OU.Network.OnAddonMessage("OLYUNITED", joiningDecision, "GUILD", "Connector-Forever")
+OU.Census.OnGuildChanged = originalGuildChange
+assert(joining.db.participatingGuilds["olympus joining"] and OU.Identity.role == "member" and censusChanges == 1,
+    "approval of the current exact guild starts only future membership and Census work")
+
+local originBudget = OU.State.NewRuntime()
+local acceptedOrigin = 0
+for index = 1, 21 do
+    local allowed = OU.State.AdmitInbound(originBudget,
+        { transportSender = "Connector-Forever", distribution = "WHISPER", hops = 1 },
+        { type = "CPAGE", id = "origin-budget-" .. index, origin = "OneOrigin-Forever", hops = 1, fields = {} }, currentTime)
+    if allowed then acceptedOrigin = acceptedOrigin + 1 end
+end
+assert(acceptedOrigin == 20 and originBudget.rate["oneorigin-forever"].count == 20,
+    "same-origin rotated ids stop at the independent 20-per-window origin ceiling")
+currentTime = currentTime + 11
+assert(OU.State.AdmitInbound(originBudget,
+    { transportSender = "Connector-Forever", distribution = "WHISPER", hops = 1 },
+    { type = "CPAGE", id = "origin-recovered", origin = "OneOrigin-Forever", hops = 1, fields = {} }, currentTime),
+    "the origin ceiling recovers after its ten-second window")
+
+local globalBudget = OU.State.NewRuntime()
+local admittedGlobal = 0
+local function admitGroup(messageType, count, offset)
+    for index = 1, count do
+        local serial = offset + index
+        local allowed = OU.State.AdmitInbound(globalBudget,
+            { transportSender = "Connector" .. ((serial - 1) % 4 + 1) .. "-Forever", distribution = "GUILD", hops = 1 },
+            { type = messageType, id = "global-" .. serial, origin = "Origin" .. serial .. "-Forever", hops = 1,
+                fields = fieldsFor(messageType, "global" .. serial) }, currentTime)
+        if allowed then admittedGlobal = admittedGlobal + 1 end
+    end
+end
+admitGroup("HELLO", 40, 0)
+admitGroup("LREQ", 40, 40)
+admitGroup("CFAIL", 80, 80)
+assert(admittedGlobal == 160 and globalBudget.receive.global.count == 160,
+    "mixed traffic across several transports shares the 160-message receiver-global ceiling")
+local globalAllowed, globalReason = OU.State.AdmitInbound(globalBudget,
+    { transportSender = "Connector5-Forever", distribution = "GUILD", hops = 1 },
+    { type = "CPAGE", id = "global-overflow", origin = "Overflow-Forever", hops = 1, fields = {} }, currentTime)
+assert(not globalAllowed and globalReason == "receiver rate limit",
+    "receiver-global saturation rejects another otherwise independent type and connector")
+
+local memoryBudget = OU.State.NewRuntime()
+memoryBudget.feed[1] = { text = string.rep("x", OU.State.LIMITS.DYNAMIC_BYTES) }
+local memoryAllowed, memoryReason = OU.State._Test.CapacityAllowed(memoryBudget,
+    { type = "HELLO", id = "memory-overflow", origin = "Origin-Forever", fields = {} }, currentTime)
+assert(not memoryAllowed and memoryReason == "memory capacity",
+    "the aggregate dynamic-memory ceiling fails closed independently of count limits")
+
+useNode(governanceReceiver)
+local sendBefore = #sent
+local sentDecision = OU.Network.SendGuildDecision({ id = "g-local-send", origin = "Zeus-Forever",
+    fields = { "olympus", "olympus manual", "Olympus Manual", "approve", 1, "-", currentTime } })
+assert(sentDecision and #sent - sendBefore == 2
+    and sent[#sent].distribution == "WHISPER" and sent[#sent - 1].distribution == "WHISPER",
+    "local decisions are sent only as whispers to the explicitly configured connectors")
+
+local modernChat = C_ChatInfo
+C_ChatInfo = nil
+assert(not OU.Network.RegisterPrefix(), "missing modern prefix API must fail safely")
+local fallbackSent, fallbackError = OU.Network._Test.SendRaw("payload", "GUILD")
+assert(not fallbackSent and fallbackError == OU.L.ERROR_ADDON_CHAT,
+    "missing modern send API must fail safely without a legacy global")
+C_ChatInfo = modernChat
 
 print("Olympus United network tests passed")

@@ -17,6 +17,10 @@ local RETAIN_SECONDS = 2592000
 local MAX_KNOWN_PLAYERS = 2000
 local MAX_WHO_RESULTS = 200
 local MAX_FRIENDS = 500
+local RUNTIME_TTL = 86400
+local MAX_GUID_CACHE = 2000
+local MAX_OLYMPUS_CACHE = 4000
+local MAX_OLYMPUS_SOURCES = OU.State.LIMITS.PARTICIPATING_GUILDS
 
 local runtime = {
     filtersInstalled = false,
@@ -68,12 +72,12 @@ function Guard.SanitizeDatabase(database)
     database.chat = type(database.chat) == "table" and database.chat or {}
     database.chat.muteNonOlympus = database.chat.muteNonOlympus == true
 
-    local candidates = {}
+    local candidates, now = {}, OU.Util.Now()
     for _, entry in pairs(type(database.chat.knownPlayers) == "table" and database.chat.knownPlayers or {}) do
         if type(entry) == "table" and PlainString(entry.name) and PlainString(entry.guild)
             and OU.Util.Trim(entry.guild) ~= "" and type(entry.seenAt) == "number" and not Secret(entry.seenAt) then
             local key = OU.Util.NormalizeName(entry.name)
-            if key then
+            if key and entry.seenAt >= 0 and entry.seenAt <= now + 60 and now - entry.seenAt <= RETAIN_SECONDS then
                 candidates[#candidates + 1] = {
                     key = key,
                     name = OU.Util.Trim(entry.name),
@@ -83,11 +87,15 @@ function Guard.SanitizeDatabase(database)
             end
         end
     end
-    table.sort(candidates, function(a, b) return a.seenAt > b.seenAt end)
+    table.sort(candidates, function(a, b)
+        if a.seenAt ~= b.seenAt then return a.seenAt > b.seenAt end
+        return a.key < b.key
+    end)
     database.chat.knownPlayers = {}
-    for index = 1, math.min(#candidates, MAX_KNOWN_PLAYERS) do
-        local entry = candidates[index]
-        database.chat.knownPlayers[entry.key] = { name = entry.name, guild = entry.guild, seenAt = entry.seenAt }
+    for _, entry in ipairs(candidates) do
+        if not database.chat.knownPlayers[entry.key] and OU.Util.Count(database.chat.knownPlayers) < MAX_KNOWN_PLAYERS then
+            database.chat.knownPlayers[entry.key] = { name = entry.name, guild = entry.guild, seenAt = entry.seenAt }
+        end
     end
     return database
 end
@@ -100,7 +108,7 @@ function Guard.Prune(database, now)
     for key, entry in pairs(known) do
         if type(key) == "string" and type(entry) == "table" and PlainString(entry.name)
             and PlainString(entry.guild) and type(entry.seenAt) == "number" and not Secret(entry.seenAt)
-            and now - entry.seenAt <= RETAIN_SECONDS then
+            and entry.seenAt >= 0 and entry.seenAt <= now + 60 and now - entry.seenAt <= RETAIN_SECONDS then
             entries[#entries + 1] = { key = key, entry = entry }
         else
             known[key] = nil
@@ -109,6 +117,46 @@ function Guard.Prune(database, now)
     table.sort(entries, function(a, b) return a.entry.seenAt > b.entry.seenAt end)
     for index = MAX_KNOWN_PLAYERS + 1, #entries do known[entries[index].key] = nil end
     return math.min(#entries, MAX_KNOWN_PLAYERS)
+end
+
+local function PruneRosterSources(key, entry, database, now)
+    if type(key) ~= "string" or type(entry) ~= "table" or Secret(entry)
+        or type(entry.sources) ~= "table" or Secret(entry.sources) then return false end
+    local valid = {}
+    for guildKey, seenAt in pairs(entry.sources) do
+        if PlainString(guildKey) and OU.Util.NormalizeGuild(guildKey) == guildKey
+            and type(seenAt) == "number" and not Secret(seenAt)
+            and now >= seenAt and now - seenAt <= RUNTIME_TTL
+            and OU.Util.IsParticipatingGuild(guildKey, database) then
+            valid[#valid + 1] = { key = guildKey, seenAt = seenAt }
+        else
+            entry.sources[guildKey] = nil
+        end
+    end
+    table.sort(valid, function(a, b)
+        if a.seenAt ~= b.seenAt then return a.seenAt > b.seenAt end
+        return a.key < b.key
+    end)
+    for index = MAX_OLYMPUS_SOURCES + 1, #valid do entry.sources[valid[index].key] = nil end
+    if #valid == 0 then return false end
+    entry.seenAt = valid[1].seenAt
+    return true
+end
+
+function Guard.PruneRuntime(now, database)
+    database = database or OU.DB
+    now = SafeNumber(now, OU.Util.Now())
+    for guid, entry in pairs(runtime.guidToName) do
+        if type(entry) ~= "table" or not PlainString(entry.key) or type(entry.seenAt) ~= "number"
+            or now < entry.seenAt or now - entry.seenAt > RUNTIME_TTL then runtime.guidToName[guid] = nil end
+    end
+    for key, entry in pairs(runtime.olympusNames) do
+        if not PruneRosterSources(key, entry, database, now) then runtime.olympusNames[key] = nil end
+    end
+end
+
+function Guard.OnGuildTrustChanged(database, now)
+    Guard.PruneRuntime(now, database)
 end
 
 function Guard.Record(name, guild, guid, now, database)
@@ -120,23 +168,41 @@ function Guard.Record(name, guild, guid, now, database)
     local key = OU.Util.NormalizeName(name)
     if not key then return false, "invalid-name" end
     now = math.max(0, math.floor(SafeNumber(now, OU.Util.Now())))
+    if OU.GuildTrust then OU.GuildTrust.Observe(guild, "local-visible", now, database) end
+    Guard.Prune(database, now)
+    if not known[key] and OU.Util.Count(known) >= MAX_KNOWN_PLAYERS then return false, "full" end
     known[key] = { name = OU.Util.Trim(name), guild = guild, seenAt = now }
-    if PlainString(guid) and guid ~= "" then runtime.guidToName[guid] = key end
-    if OU.Util.Count(known) > MAX_KNOWN_PLAYERS + 100 then Guard.Prune(database, now) end
-    return true, OU.Util.IsOlympusGuild(guild) and "olympus" or "outside"
+    Guard.PruneRuntime(now)
+    if PlainString(guid) and guid ~= "" and (runtime.guidToName[guid] or OU.Util.Count(runtime.guidToName) < MAX_GUID_CACHE) then
+        runtime.guidToName[guid] = { key = key, seenAt = now }
+    end
+    return true, OU.Util.IsParticipatingGuild(guild) and "olympus" or "outside"
 end
 
 function Guard.ImportRoster(names, guild, now, database)
-    if type(names) ~= "table" or Secret(names) or not PlainString(guild) or not OU.Util.IsOlympusGuild(guild) then
+    database = database or OU.DB
+    local guildKey = PlainString(guild) and OU.Util.NormalizeGuild(guild) or nil
+    if type(names) ~= "table" or Secret(names) or not guildKey
+        or not OU.Util.IsParticipatingGuild(guildKey, database) then
         return 0
     end
+    now = math.max(0, math.floor(SafeNumber(now, OU.Util.Now())))
+    Guard.PruneRuntime(now, database)
     local imported = 0
     for index = 1, math.min(#names, 1000) do
         if PlainString(names[index]) then
             local key = OU.Util.NormalizeName(names[index])
             if key then
-                runtime.olympusNames[key] = true
-                imported = imported + 1
+                local entry = runtime.olympusNames[key]
+                if not entry and OU.Util.Count(runtime.olympusNames) < MAX_OLYMPUS_CACHE then
+                    entry = { seenAt = now, sources = {} }
+                    runtime.olympusNames[key] = entry
+                end
+                if entry and (entry.sources[guildKey] or OU.Util.Count(entry.sources) < MAX_OLYMPUS_SOURCES) then
+                    entry.sources[guildKey] = now
+                    entry.seenAt = math.max(tonumber(entry.seenAt) or 0, now)
+                    imported = imported + 1
+                end
             end
         end
     end
@@ -149,8 +215,9 @@ function Guard.ObserveUnit(unit)
     if UnitIsPlayer and not UnitIsPlayer(unit) then return false, "not-player" end
     local name = FullUnitName(unit)
     if not name then return false, "unknown-name" end
-    local guild = GetGuildInfo and GetGuildInfo(unit)
-    if not PlainString(guild) or OU.Util.Trim(guild) == "" then return false, "unknown-guild" end
+    local guildOK, guild = false, nil
+    if type(GetGuildInfo) == "function" then guildOK, guild = pcall(GetGuildInfo, unit) end
+    if not guildOK or not PlainString(guild) or OU.Util.Trim(guild) == "" then return false, "unknown-guild" end
     local guid = UnitGUID and UnitGUID(unit) or nil
     if guid ~= nil and not PlainString(guid) then guid = nil end
     return Guard.Record(name, guild, guid, OU.Util.Now())
@@ -209,15 +276,19 @@ function Guard.Classify(sender, guid, now, database)
     if not PlainString(sender) then return "unknown" end
     now = SafeNumber(now, OU.Util.Now())
     local key = OU.Util.NormalizeName(sender)
-    if PlainString(guid) and runtime.guidToName[guid] then key = runtime.guidToName[guid] end
-    if key and runtime.olympusNames[key] then return "olympus" end
+    local guidEntry = PlainString(guid) and runtime.guidToName[guid] or nil
+    if type(guidEntry) == "table" and type(guidEntry.seenAt) == "number" and now >= guidEntry.seenAt
+        and now - guidEntry.seenAt <= RUNTIME_TTL then key = guidEntry.key end
+    local olympusSeen = key and runtime.olympusNames[key]
+    if olympusSeen and PruneRosterSources(key, olympusSeen, database, now) then return "olympus" end
+    if key and olympusSeen then runtime.olympusNames[key] = nil end
     local known = KnownPlayers(database)
     local entry = known and key and known[key]
     if type(entry) ~= "table" or not PlainString(entry.guild) or type(entry.seenAt) ~= "number"
         or Secret(entry.seenAt) or now < entry.seenAt or now - entry.seenAt > FRESH_SECONDS then
         return "unknown"
     end
-    return OU.Util.IsOlympusGuild(entry.guild) and "olympus" or "outside"
+    return OU.Util.IsParticipatingGuild(entry.guild) and "olympus" or "outside"
 end
 
 function Guard.IsActive(database)
@@ -248,7 +319,7 @@ end
 
 function Guard.InstallFilters()
     if runtime.filtersInstalled then return true end
-    local add = ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter or ChatFrame_AddMessageEventFilter
+    local add = ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter
     if type(add) ~= "function" then return false, "chat-filter-unavailable" end
     for event in pairs(FILTER_EVENTS) do add(event, ChatFilter) end
     runtime.filtersInstalled = true
@@ -270,6 +341,7 @@ function Guard.Start()
     if not OU.DB then return false, "database-unavailable" end
     Guard.SanitizeDatabase(OU.DB)
     Guard.Prune(OU.DB, OU.Util.Now())
+    Guard.PruneRuntime(OU.Util.Now())
     Guard.RefreshGroup()
     Guard.RefreshFriends()
     Guard.ObserveUnit("target")
@@ -293,6 +365,11 @@ Guard._Test = {
     FRESH_SECONDS = FRESH_SECONDS,
     RETAIN_SECONDS = RETAIN_SECONDS,
     MAX_KNOWN_PLAYERS = MAX_KNOWN_PLAYERS,
+    RUNTIME_TTL = RUNTIME_TTL,
+    MAX_GUID_CACHE = MAX_GUID_CACHE,
+    MAX_OLYMPUS_CACHE = MAX_OLYMPUS_CACHE,
+    MAX_OLYMPUS_SOURCES = MAX_OLYMPUS_SOURCES,
     Runtime = runtime,
     ChatFilter = ChatFilter,
+    PruneRosterSources = PruneRosterSources,
 }

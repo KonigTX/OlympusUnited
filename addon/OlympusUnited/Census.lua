@@ -10,7 +10,9 @@ local function Identity()
 end
 
 local function LocalGuildKey()
-    return OU.Util.NormalizeGuild(Identity().guild)
+    local guild = Identity().guild
+    if not OU.Util.IsParticipatingGuild(guild) then return nil end
+    return OU.Util.NormalizeGuild(guild)
 end
 
 local function SelfKey()
@@ -21,6 +23,45 @@ local function UInt(value, maximum)
     local number = tonumber(value)
     if not number or number ~= math.floor(number) or number < 0 or number > maximum then return nil end
     return number
+end
+
+local function MapCount(map)
+    local count = 0
+    for _ in pairs(type(map) == "table" and map or {}) do count = count + 1 end
+    return count
+end
+
+local function CandidateCount(candidates)
+    local count = 0
+    for _, guildCandidates in pairs(type(candidates) == "table" and candidates or {}) do
+        if type(guildCandidates) == "table" then for _ in pairs(guildCandidates) do count = count + 1 end end
+    end
+    return count
+end
+
+local function AssemblyNameBytes(census)
+    local total = 0
+    for _, holder in pairs(type(census.assemblies) == "table" and census.assemblies or {}) do
+        if type(holder) == "table" then
+            for _, name in ipairs(type(holder.names) == "table" and holder.names or {}) do total = total + #tostring(name) end
+            local logic = holder.logic
+            for _, page in pairs(type(logic) == "table" and type(logic.pages) == "table" and logic.pages or {}) do
+                for _, name in ipairs(type(page) == "table" and page or {}) do total = total + #tostring(name) end
+            end
+        end
+    end
+    return total
+end
+
+function Census.AdmitRoute(runtime, requestId, route, now)
+    local routes = runtime.census.routes
+    if routes[requestId] then return false end
+    for key, value in pairs(routes) do
+        if type(value) ~= "table" or type(value.expiresAt) ~= "number" or value.expiresAt <= now then routes[key] = nil end
+    end
+    if MapCount(routes) >= C.MAX_ROUTES then return false end
+    routes[requestId] = route
+    return true
 end
 
 local function SendGuild(messageType, id, fields, origin, hops)
@@ -122,7 +163,9 @@ function Census.BeginElection(runtime, now)
     now = now or OU.Util.Now()
     local capture = runtime.census.localCapture
     local guildKey = capture and capture.guildKey
-    if not guildKey or capture.state ~= "complete" then return false, "roster-unavailable" end
+    if not guildKey or capture.state ~= "complete" or not OU.Util.IsParticipatingGuild(capture.guild) then
+        return false, "roster-unavailable"
+    end
     local current = runtime.census.leases[guildKey]
     if OU.CensusLogic.LeaseActive(current, now) then return false, "lease-active" end
     local term = math.floor(now / C.ELECTION_WINDOW) + 1
@@ -130,7 +173,13 @@ function Census.BeginElection(runtime, now)
     local proposal = { guildKey = guildKey, guildDisplay = capture.guild, term = term,
         leaseStartedAt = closeAt, leaseSeq = 1, reporter = Identity().name, closesAt = closeAt }
     runtime.census.candidate = proposal
+    Census.Prune(runtime, now, true)
     runtime.census.candidates[guildKey] = runtime.census.candidates[guildKey] or {}
+    if not runtime.census.candidates[guildKey][SelfKey()]
+        and CandidateCount(runtime.census.candidates) >= C.MAX_CANDIDATES then
+        runtime.census.candidate = nil
+        return false, "candidate-capacity"
+    end
     runtime.census.candidates[guildKey][SelfKey()] = proposal
     local messageType, id, fields = OU.Protocol.Candidate(guildKey, capture.guild, term)
     SendGuild(messageType, id, fields, Identity().name, 0)
@@ -150,10 +199,15 @@ function Census.BeginElection(runtime, now)
 end
 
 function Census.Capture(runtime)
+    if not LocalGuildKey() then
+        runtime.census.localCapture = { state = "unavailable", reason = "not-participating", failedAt = OU.Util.Now() }
+        Notify()
+        return false, "not-participating"
+    end
     runtime.census.localCapture = { state = "loading", startedAt = OU.Util.Now() }
     Notify()
     return OU.GuildRoster.Request(function(result)
-        if result.ok then
+        if result.ok and OU.Util.IsParticipatingGuild(result.guild) then
             local snapshotId = ("snap-%d-%d"):format(result.capturedAt % 10000000000, (#result.names % 1000))
             result.state = "complete"
             result.snapshotId = snapshotId
@@ -171,7 +225,7 @@ end
 function Census.RefreshReporterSnapshot(runtime, callback)
     callback = callback or function() end
     return OU.GuildRoster.Request(function(result)
-        if not result.ok then
+        if not result.ok or not OU.Util.IsParticipatingGuild(result.guild) then
             runtime.census.localCapture = { state = "unavailable", reason = result.reason, failedAt = OU.Util.Now() }
             runtime.census.activeTransfer = nil
             Notify()
@@ -192,6 +246,10 @@ end
 function Census.Start()
     if not OU.Runtime or not OU.Runtime.census then return false end
     Census._Test.EnsureTick(OU.Runtime)
+    if not LocalGuildKey() then
+        OU.Runtime.census.localCapture = { state = "unavailable", reason = "not-participating", failedAt = OU.Util.Now() }
+        return false, "not-participating"
+    end
     return Census.Capture(OU.Runtime)
 end
 
@@ -199,7 +257,8 @@ function Census.OnGuildChanged()
     Census.generation = Census.generation + 1
     if OU.Runtime and OU.Runtime.census then
         OU.Runtime.census.candidate = nil
-        Census.Capture(OU.Runtime)
+        if LocalGuildKey() then Census.Capture(OU.Runtime)
+        else OU.Runtime.census.localCapture = { state = "unavailable", reason = "not-participating", failedAt = OU.Util.Now() } end
     end
 end
 
@@ -214,7 +273,10 @@ local function ApplyCandidate(runtime, message, now)
     local closeAt = term * C.ELECTION_WINDOW
     local item = { guildKey = guildKey, guildDisplay = fields[2], term = term, leaseStartedAt = closeAt,
         leaseSeq = 1, reporter = message.origin, receivedAt = now, closesAt = closeAt }
+    Census.Prune(runtime, now, true)
     runtime.census.candidates[guildKey] = runtime.census.candidates[guildKey] or {}
+    if not runtime.census.candidates[guildKey][reporter]
+        and CandidateCount(runtime.census.candidates) >= C.MAX_CANDIDATES then return nil, "candidate capacity" end
     runtime.census.candidates[guildKey][reporter] = item
     Reassert(runtime, term, now)
     return { kind = "census-candidate", value = item }
@@ -247,7 +309,9 @@ end
 local function ApplySummary(runtime, message, now)
     local f = message.fields
     local guildKey = OU.Util.NormalizeGuild(f[1])
-    if not guildKey or guildKey ~= OU.Util.NormalizeGuild(f[2]) then return nil, "guild mismatch" end
+    if not guildKey or guildKey ~= OU.Util.NormalizeGuild(f[2]) or not OU.Util.IsParticipatingGuild(f[2]) then
+        return nil, "guild mismatch"
+    end
     local term, revision = UInt(f[3], 9999999999), UInt(f[4], 999999)
     local capturedAt, total = UInt(f[6], 9999999999), UInt(f[7], 1000)
     local online = f[8] == "U" and nil or UInt(f[8], 1000)
@@ -264,6 +328,8 @@ local function ApplySummary(runtime, message, now)
         reporter = message.origin, receivedAt = now }
     local current = runtime.census.summaries[guildKey]
     if current and OU.CensusLogic.CompareSummary(summary, current) <= 0 then return nil, "stale summary" end
+    Census.Prune(runtime, now, true)
+    if not current and MapCount(runtime.census.summaries) >= C.MAX_SUMMARIES then return nil, "summary capacity" end
     runtime.census.summaries[guildKey] = summary
     Notify()
     return { kind = "census-summary", value = summary }
@@ -305,7 +371,8 @@ function Census.HandleRequest(runtime, route, message, now)
     local requestId, guildKey, snapshotId, target = message.fields[1], OU.Util.NormalizeGuild(message.fields[2]), message.fields[3], message.fields[4]
     local reporter, lease = Census.IsReporter(runtime, now)
     local capture = runtime.census.localCapture
-    if not reporter or OU.Util.NormalizeName(target) ~= SelfKey() or guildKey ~= LocalGuildKey() then
+    if not reporter or not OU.Util.IsParticipatingGuild(message.fields[2])
+        or OU.Util.NormalizeName(target) ~= SelfKey() or guildKey ~= LocalGuildKey() then
         return FailRequest(route, requestId, "unavailable")
     end
     if runtime.census.activeTransfer then return FailRequest(route, requestId, "busy") end
@@ -314,6 +381,10 @@ function Census.HandleRequest(runtime, route, message, now)
     if not capture or capture.state ~= "complete" or capture.snapshotId ~= snapshotId then return FailRequest(route, requestId, "snapshot") end
     local pages, err = OU.CensusLogic.BuildPages(requestId, capture.names, Identity().name)
     if not pages then return FailRequest(route, requestId, err == "invalid names" and "unavailable" or "snapshot") end
+    Census.Prune(runtime, now, true)
+    if not runtime.census.cooldowns[cooldownKey] and MapCount(runtime.census.cooldowns) >= C.MAX_COOLDOWNS then
+        return FailRequest(route, requestId, "busy")
+    end
     runtime.census.cooldowns[cooldownKey] = now + C.REQUEST_COOLDOWN
     local transfer = { requestId = requestId, pages = pages, total = #capture.names, route = route, index = 0,
         reporter = lease.reporter, startedAt = now }
@@ -325,17 +396,23 @@ end
 function Census.RequestRoster(guildKey)
     local runtime, now = OU.Runtime, OU.Util.Now()
     guildKey = OU.Util.NormalizeGuild(guildKey)
+    if not guildKey or not OU.Util.IsParticipatingGuild(guildKey) then return false, "unavailable" end
+    Census.Prune(runtime, now, true)
     local summary = guildKey and runtime.census.summaries[guildKey]
     if not summary then return false, "unavailable" end
     local state = OU.CensusLogic.Freshness(summary, now)
     if state == "expired" then return false, "expired" end
     local cooldown = runtime.census.cooldowns[guildKey .. "|requester"] or 0
     if cooldown > now then return false, "cooldown", cooldown - now end
+    if MapCount(runtime.census.assemblies) >= C.MAX_ASSEMBLIES then return false, "busy" end
+    if not runtime.census.cooldowns[guildKey .. "|requester"] and MapCount(runtime.census.cooldowns) >= C.MAX_COOLDOWNS then
+        return false, "busy"
+    end
     OU._censusRequestID = (OU._censusRequestID or 0) + 1
     local requestId = OU.CensusLogic.RequestID(Identity().name, now, OU._censusRequestID)
     local route = { role = "requester", requestId = requestId, guildKey = guildKey, snapshotId = summary.snapshotId,
         requester = Identity().name, reporter = summary.reporter, expiresAt = now + C.ROUTE_TTL }
-    runtime.census.routes[requestId] = route
+    if not Census.AdmitRoute(runtime, requestId, route, now) then return false, "busy" end
     runtime.census.cooldowns[guildKey .. "|requester"] = now + C.REQUEST_COOLDOWN
     local messageType, id, fields = OU.Protocol.RosterRequest(requestId, guildKey, summary.snapshotId, summary.reporter)
     local sent, err = OU.Network.Send(messageType, id, fields)
@@ -357,18 +434,35 @@ function Census.ReceivePage(runtime, message, now)
     local pageIndex, pageCount, totalNames = tonumber(message.fields[2]), tonumber(message.fields[3]), tonumber(message.fields[4])
     local names = {}
     for index = 5, #message.fields do names[#names + 1] = message.fields[index] end
+    local incomingBytes = 0
+    for _, name in ipairs(names) do incomingBytes = incomingBytes + #tostring(name) end
+    if AssemblyNameBytes(runtime.census) + incomingBytes > C.MAX_ASSEMBLY_BYTES then
+        holder.state, holder.reason, holder.finishedAt, holder.expiresAt = "error", "capacity", now, now + C.ASSEMBLY_ERROR_TTL
+        holder.logic, holder.names = nil, nil
+        return nil, "assembly capacity"
+    end
     if not holder.logic then
         local logic, err = OU.CensusLogic.NewAssembly(requestId, message.origin, totalNames, pageCount, now)
-        if not logic then holder.state = "error"; holder.reason = err; return nil, err end
+        if not logic then
+            holder.state, holder.reason, holder.finishedAt, holder.expiresAt = "error", err, now, now + C.ASSEMBLY_ERROR_TTL
+            holder.logic, holder.names = nil, nil
+            return nil, err
+        end
         holder.logic = logic
     end
     local status, result = OU.CensusLogic.ApplyPage(holder.logic, pageIndex, pageCount, totalNames, names, now)
-    if not status then holder.state = "error"; holder.reason = result; return nil, result end
+    if not status then
+        holder.state, holder.reason, holder.finishedAt, holder.expiresAt = "error", result, now, now + C.ASSEMBLY_ERROR_TTL
+        holder.logic, holder.names = nil, nil
+        return nil, result
+    end
     holder.received, holder.pageCount = holder.logic.received, holder.logic.pageCount
     if status == "complete" then
         holder.state = "complete"
         holder.names = result
         holder.loadedAt = now
+        holder.expiresAt = now + C.ASSEMBLY_COMPLETE_TTL
+        holder.logic = nil
         local summary = runtime.census.summaries[holder.guildKey]
         if OU.ChatGuard and summary then OU.ChatGuard.ImportRoster(result, summary.guildDisplay, now) end
     end
@@ -380,7 +474,8 @@ function Census.ReceiveFailure(runtime, message, now)
     local requestId, reason = message.fields[1], message.fields[2]
     local holder = runtime.census.assemblies[requestId]
     if not holder then return nil, "no assembly" end
-    holder.state, holder.reason, holder.finishedAt = "error", reason, now
+    holder.state, holder.reason, holder.finishedAt, holder.expiresAt = "error", reason, now, now + C.ASSEMBLY_ERROR_TTL
+    holder.logic, holder.names = nil, nil
     if reason == "busy" or reason == "unavailable" or reason == "snapshot" then
         runtime.census.cooldowns[holder.guildKey .. "|requester"] = nil
     end
@@ -388,16 +483,60 @@ function Census.ReceiveFailure(runtime, message, now)
     return { kind = "census-failure", value = holder }
 end
 
-function Census.Prune(runtime, now)
+function Census.Prune(runtime, now, skipElection)
     local census = runtime.census
-    for requestId, route in pairs(census.routes) do if (route.expiresAt or 0) <= now then census.routes[requestId] = nil end end
-    for requestId, assembly in pairs(census.assemblies) do
-        if (assembly.expiresAt or 0) <= now and assembly.state == "loading" then assembly.state, assembly.reason = "error", "expired" end
+    for requestId, route in pairs(census.routes) do
+        if type(route) ~= "table" or type(route.expiresAt) ~= "number" or route.expiresAt <= now then
+            census.routes[requestId] = nil
+        end
     end
-    for key, untilTime in pairs(census.cooldowns) do if untilTime <= now then census.cooldowns[key] = nil end end
+    for key, bucket in pairs(census.pageRate) do
+        if type(bucket) ~= "table" or type(bucket.lastTouched or bucket.last) ~= "number"
+            or now - (bucket.lastTouched or bucket.last) > C.PAGE_RATE_TTL or not census.routes[bucket.requestId] then
+            census.pageRate[key] = nil
+        end
+    end
+    for requestId, assembly in pairs(census.assemblies) do
+        if type(assembly) ~= "table" then
+            census.assemblies[requestId] = nil
+        elseif assembly.state == "loading" and (assembly.expiresAt or 0) <= now then
+            assembly.state, assembly.reason, assembly.finishedAt = "error", "expired", now
+            assembly.expiresAt, assembly.logic, assembly.names = now + C.ASSEMBLY_ERROR_TTL, nil, nil
+        elseif assembly.state == "complete" and now >= (assembly.expiresAt or ((assembly.loadedAt or now) + C.ASSEMBLY_COMPLETE_TTL)) then
+            census.assemblies[requestId] = nil
+        elseif assembly.state == "error" and now >= (assembly.expiresAt or ((assembly.finishedAt or now) + C.ASSEMBLY_ERROR_TTL)) then
+            census.assemblies[requestId] = nil
+        elseif assembly.state ~= "loading" and assembly.state ~= "complete" and assembly.state ~= "error" then
+            census.assemblies[requestId] = nil
+        end
+    end
+    for key, untilTime in pairs(census.cooldowns) do
+        if type(untilTime) ~= "number" or untilTime <= now then census.cooldowns[key] = nil end
+    end
+    for guildKey, summary in pairs(census.summaries) do
+        local retainedAt = type(summary) == "table" and (summary.receivedAt or summary.capturedAt) or nil
+        if type(retainedAt) ~= "number" or now - retainedAt > C.SUMMARY_RETENTION
+            or not OU.Util.IsParticipatingGuild(guildKey) then census.summaries[guildKey] = nil end
+    end
+    for guildKey, guildCandidates in pairs(census.candidates) do
+        if type(guildCandidates) ~= "table" or guildKey ~= LocalGuildKey() then
+            census.candidates[guildKey] = nil
+        else
+            for reporter, candidate in pairs(guildCandidates) do
+                local retainedAt = type(candidate) == "table" and (candidate.receivedAt or candidate.closesAt) or nil
+                if type(retainedAt) ~= "number" or now - retainedAt > C.CANDIDATE_TTL then guildCandidates[reporter] = nil end
+            end
+            if next(guildCandidates) == nil then census.candidates[guildKey] = nil end
+        end
+    end
+    for guildKey, retainedLease in pairs(census.leases) do
+        if guildKey ~= LocalGuildKey() or type(retainedLease) ~= "table" or type(retainedLease.receivedAt) ~= "number"
+            or now - retainedLease.receivedAt > C.LEASE_RETENTION then census.leases[guildKey] = nil end
+    end
     local key = LocalGuildKey()
     local lease = key and census.leases[key]
-    if lease and not OU.CensusLogic.LeaseActive(lease, now) and census.localCapture.state == "complete" and not census.candidate then
+    if not skipElection and lease and not OU.CensusLogic.LeaseActive(lease, now)
+        and census.localCapture.state == "complete" and not census.candidate then
         Census.BeginElection(runtime, now)
     end
 end

@@ -33,6 +33,7 @@ def verify_manifest() -> None:
     assert "## Interface: 16001, 16000" in toc_text
     assert "## SavedVariables: OlympusUnitedDB" in toc_text
     assert "## Version: 0.5.0" in toc_text
+    assert "## Author: KonigTX" in toc_text and "Konigtx" not in toc_text
     assert "## X-Curse-Project-ID: 1709990" in toc_text
     assert (ADDON / "Media" / "OlympusLogo.tga").is_file()
 
@@ -48,6 +49,7 @@ def run_lua_specs() -> None:
     os.environ["OLYMPUS_UNITED_ROOT"] = ROOT.as_posix()
     for spec in (
         ROOT / "tests" / "protocol_state_spec.lua",
+        ROOT / "tests" / "guild_trust_spec.lua",
         ROOT / "tests" / "chat_guard_spec.lua",
         ROOT / "tests" / "census_spec.lua",
         ROOT / "tests" / "guild_roster_spec.lua",
@@ -70,13 +72,21 @@ def verify_api_provenance() -> None:
     chat_filters = source / "Blizzard_ChatFrameBase" / "Shared" / "ChatFrameFilters.lua"
     chat_docs = source / "Blizzard_APIDocumentationGenerated" / "ChatInfoDocumentation.lua"
     friend_docs = source / "Blizzard_APIDocumentationGenerated" / "FriendListDocumentation.lua"
-    for path in (club, guild, communities, chat_filters, chat_docs, friend_docs):
+    player_docs = source / "Blizzard_APIDocumentationGenerated" / "PlayerScriptDocumentation.lua"
+    community_frame = source / "Blizzard_Communities" / "CommunitiesFrame.lua"
+    for path in (club, guild, communities, chat_filters, chat_docs, friend_docs, player_docs, community_frame):
         assert path.is_file(), f"Forever API source missing: {path}"
     club_text = club.read_text(encoding="utf-8-sig")
     for token in ("GetGuildClubId", "GetClubInfo", "GetClubMembers", "GetMemberInfo", "ClubMemberInfo", "memberCount", "presence"):
         assert token in club_text, f"Club API provenance missing {token}"
     guild_text = guild.read_text(encoding="utf-8-sig")
     assert 'Name = "GuildRoster"' in guild_text and 'LiteralName = "GUILD_ROSTER_UPDATE"' in guild_text
+    assert 'Name = "IsGuildOfficer"' in guild_text, "exact-build guild-officer predicate is missing"
+    player_text = player_docs.read_text(encoding="utf-8-sig")
+    assert 'Name = "IsGuildLeader"' in player_text, "exact-build guild-leader predicate is missing"
+    authority_text = community_frame.read_text(encoding="utf-8-sig")
+    assert re.search(r"IsGuildLeader\(\)\s+or\s+C_GuildInfo\.IsGuildOfficer\(\)", authority_text), \
+        "Blizzard's combined guild authority predicate is missing"
     live_text = communities.read_text(encoding="utf-8-sig")
     assert "C_Club.GetClubMembers" in live_text and "C_Club.GetMemberInfo" in live_text
     filter_text = chat_filters.read_text(encoding="utf-8-sig")
@@ -196,6 +206,8 @@ def verify_privacy_and_copy() -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--installed-path", type=Path)
+    parser.add_argument("--archive", action="store_true",
+                        help="also verify the repository dist candidate; omitted for source-only repair gates")
     args = parser.parse_args()
     verify_manifest()
     verify_lua_syntax()
@@ -203,7 +215,8 @@ if __name__ == "__main__":
     verify_api_provenance()
     verify_skill_inputs()
     verify_privacy_and_copy()
-    verify_archive()
+    if args.archive or args.installed_path:
+        verify_archive()
     if args.installed_path:
         verify_installed(args.installed_path)
     print("Olympus United verification passed")

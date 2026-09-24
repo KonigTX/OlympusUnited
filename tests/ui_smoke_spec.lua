@@ -1,5 +1,7 @@
 local root = assert(os.getenv("OLYMPUS_UNITED_ROOT"), "OLYMPUS_UNITED_ROOT is required")
 local now, frames, timers, sent = 300000, {}, {}, {}
+local currentGuild, leaderValue, officerValue = "OLYMPUS", false, false
+local leaderUnavailable, secretRoles = false, false
 unpack = unpack or table.unpack
 
 local function NewWidget(kind, parent, template)
@@ -79,7 +81,10 @@ function UnitName() return "Zeus" end
 function UnitFullName() return "Zeus", "Forever" end
 function UnitLevel() return 60 end
 function UnitClass() return "Warrior", "WARRIOR" end
-function GetGuildInfo() return "Olympus I" end
+function GetGuildInfo() return currentGuild end
+function IsGuildLeader() if leaderUnavailable then error("unavailable") end return leaderValue end
+C_GuildInfo = { IsGuildOfficer = function() return officerValue end }
+function issecretvalue(value) return secretRoles and type(value) == "boolean" end
 function GetRealZoneText() return "Stormwind City" end
 function IsInGuild() return true end
 C_ChatInfo = {
@@ -94,8 +99,16 @@ C_Timer = { After = function(delay, callback) timers[#timers + 1] = { delay = de
 
 local OU = {}
 for _, file in ipairs({ "Util.lua", "CensusLogic.lua", "Strings.lua", "Protocol.lua", "State.lua", "ChatGuard.lua",
-    "Network.lua", "GuildRoster.lua", "Census.lua", "Core.lua", "UIPrimitives.lua", "UI.lua", "Commands.lua" }) do
+    "GuildTrust.lua", "Network.lua", "GuildRoster.lua", "Census.lua", "Core.lua", "UIPrimitives.lua", "UI.lua", "Commands.lua" }) do
     assert(loadfile(root .. "/addon/OlympusUnited/" .. file))("OlympusUnited", OU)
+end
+
+OlympusUnitedDB = { window = { point = "BROKEN", x = 0/0, y = math.huge }, guildGovernance = {} }
+for index, name in ipairs({ "Olympus I", "Olympus II", "Olympus III", "Olympus IV" }) do
+    local key = OU.Util.NormalizeGuild(name)
+    OlympusUnitedDB.guildGovernance[key] = { displayName = name, state = "approved",
+        firstSeenAt = now - 10, lastSeenAt = now, evidenceMask = 1, observations = 1, deniedEvidenceMask = 0,
+        generation = 1, decisionId = "g-ui-" .. index, decidedAt = now, sourceClass = "local-officer" }
 end
 
 local controller = assert(OU._Test.Controller)
@@ -108,6 +121,9 @@ assert(OU.UI.frame.ouClose.template == "UIPanelCloseButtonDefaultAnchors", "clos
 assert(OU.UI.crest.texture == "Interface\\AddOns\\OlympusUnited\\Media\\OlympusLogo", "bundled Olympus logo is retained")
 assert(#UISpecialFrames == 1 and UISpecialFrames[1] == "OlympusUnitedFrame", "Escape closes the window")
 assert(not OU.UI.frame:IsShown(), "window starts hidden")
+local safePoint, _, _, safeX, safeY = OU.UI.frame:GetPoint(1)
+assert(safePoint == "CENTER" and safeX == 0 and safeY == 0,
+    "window construction consumes only the repaired safe anchor and coordinates")
 
 OU.Open()
 assert(OU.UI.frame:IsShown() and OU.UI.status.text:find("OLYMPUS", 1, true), "opening shows member status")
@@ -116,7 +132,7 @@ OU.UI.helpButton.scripts.OnEnter(OU.UI.helpButton)
 assert(GameTooltip:IsShown() and GameTooltip.text == "How to use Olympus United" and #GameTooltip.lines == 5,
     "[?] hover provides the concise guide without a modal")
 assert(GameTooltip.lines[1]:find("only for current Olympus guild members", 1, true)
-    and GameTooltip.lines[2]:find("works automatically", 1, true)
+    and GameTooltip.lines[2]:find("Exact approved guilds", 1, true)
     and GameTooltip.lines[3]:find("linking coordinator", 1, true),
     "[?] guide explains chat membership, automatic local features, and remote setup in player language")
 OU.UI.helpButton.scripts.OnLeave()
@@ -151,16 +167,69 @@ OU.UI.input:SetText("15 World boss :: Meet at the gate")
 OU.UI.composeButton.scripts.OnClick()
 assert(next(OU.Runtime.events), "Events composer remains usable")
 OU.UI.tabs.MEMBERS.scripts.OnClick()
-assert(OU.UI.rows[1].body.text:find("Your guild works automatically", 1, true)
-    and OU.UI.rows[1].body.text:find("Census", 1, true)
-    and OU.UI.rows[1].body.text:find("report", 1, true),
-    "People help gives members and reporters the remote Census setup action")
+assert(OU.UI.rows[1].body.text:find("agreed", 1, true)
+    and OU.UI.rows[1].body.text:find("configured", 1, true)
+    and OU.UI.rows[1].body.text:find("not because", 1, true),
+    "People explains the bounded manual connector-trust boundary without claiming verified identity")
 OU.UI.input:SetText("Athena-Forever")
 OU.UI.composeButton.scripts.OnClick()
 assert(OU.DB.bridges["athena-forever"], "People connector composer remains usable")
 assert(OU.UI.rows[1].action:IsShown(), "People linking control remains visible")
 OU.UI.rows[1].action.scripts.OnClick()
 assert(OU.DB.bridgeMode, "People linking control remains clickable")
+
+local function VisibleRow(text)
+    for _, row in ipairs(OU.UI.rows) do
+        if row:IsShown() and row.heading.text == text then return row end
+    end
+end
+OU.GuildTrust.Observe("Olympus Review", "local-visible", now, OU.DB)
+leaderValue = true
+OU.RefreshUI()
+local reviewSection, pendingRow = VisibleRow("Guild review"), VisibleRow("Olympus Review")
+assert(reviewSection and pendingRow and pendingRow.action:IsShown() and pendingRow.secondaryAction:IsShown()
+    and pendingRow.action.text == "Approve" and pendingRow.secondaryAction.text == "Deny",
+    "a verified root leader sees exactly Approve and Deny on each pending review row")
+pendingRow.secondaryAction.scripts.OnClick()
+local deniedRow = VisibleRow("Olympus Review")
+assert(OU.DB.guildGovernance["olympus review"].state == "denied" and deniedRow.action.text == "Reconsider",
+    "a denied decision remains untrusted and exposes Reconsider in the status list")
+OU.GuildTrust.Observe("Olympus Command", "local-visible", now, OU.DB)
+SlashCmdList.OLYMPUSUNITED("guild approve Olympus Command")
+assert(OU.DB.guildGovernance["olympus command"].state == "approved"
+    and OU.DB.participatingGuilds["olympus command"], "slash and UI actions share the same governance mutator")
+
+OU.GuildTrust.Observe("Olympus Hidden", "local-visible", now, OU.DB)
+leaderValue, officerValue = false, false
+OU.RefreshUI()
+assert(not VisibleRow("Guild review") and not VisibleRow("Olympus Hidden"),
+    "ordinary root members see neither candidate identities nor governance actions")
+currentGuild, leaderValue = "Other Guild", true
+OU.RefreshUI()
+assert(not VisibleRow("Guild review") and not VisibleRow("Olympus Hidden"),
+    "a leader flag outside exact OLYMPUS does not reveal governance actions")
+currentGuild = "Olympus Local Discovery"
+controller.scripts.OnEvent(controller, "PLAYER_GUILD_UPDATE")
+assert(OU.DB.guildGovernance["olympus local discovery"].state == "pending"
+    and not OU.DB.participatingGuilds["olympus local discovery"] and OU.Identity.role == "guest"
+    and not VisibleRow("Guild review"),
+    "a guild-change event discovers a local Olympus-like name without granting status or review authority")
+currentGuild, leaderValue, leaderUnavailable = "OLYMPUS", false, true
+controller.scripts.OnEvent(controller, "PLAYER_GUILD_UPDATE")
+assert(not VisibleRow("Guild review") and not VisibleRow("Olympus Hidden"),
+    "unavailable exact-build authority evidence hides governance actions")
+leaderUnavailable, secretRoles = false, true
+OU.RefreshUI()
+assert(not VisibleRow("Guild review") and not VisibleRow("Olympus Hidden"),
+    "secret role results hide governance actions")
+secretRoles, leaderValue, officerValue = false, false, true
+OU.RefreshUI()
+assert(VisibleRow("Guild review") and VisibleRow("Olympus Hidden"),
+    "a fresh valid officer result independently restores the bounded review surface")
+leaderValue, officerValue = true, false
+OU.RefreshUI()
+assert(VisibleRow("Guild review") and VisibleRow("Olympus Hidden"),
+    "a fresh valid leader result restores the bounded review surface")
 
 OU.UI.tabs.CENSUS.scripts.OnClick()
 assert(not OU.UI.input:IsShown() and not OU.UI.composeButton:IsShown(), "Census reclaims composer space")

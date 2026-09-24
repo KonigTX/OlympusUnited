@@ -31,7 +31,9 @@ end
 local function ResetRow(row)
     row:Hide()
     row.action:Hide()
+    row.secondaryAction:Hide()
     row.action:SetScript("OnClick", nil)
+    row.secondaryAction:SetScript("OnClick", nil)
     row:SetScript("OnMouseDown", nil)
     row.heading:SetText("")
     row.body:SetText("")
@@ -57,6 +59,8 @@ local function ResetRow(row)
     row.action:ClearAllPoints()
     row.action:SetPoint("TOPLEFT", row, "TOPLEFT", 24, -98)
     row.action:SetEnabled(true)
+    row.secondaryAction:ClearAllPoints()
+    row.secondaryAction:SetEnabled(true)
     local bodyFont = row.body.ouDefaultFont
     if bodyFont then row.body:SetFont(bodyFont[1], bodyFont[2], bodyFont[3]) end
     SetColor(row.body, { 0.90, 0.90, 0.90 })
@@ -106,6 +110,8 @@ local function GetRow(index)
     row.hint:SetWordWrap(true)
     row.action = P.Button(row, L.BUTTON_INVITE, 150, 22)
     row.action:SetPoint("TOPLEFT", row, "TOPLEFT", 24, -98)
+    row.secondaryAction = P.Button(row, L.BUTTON_DENY_GUILD, 100, 22)
+    row.secondaryAction:SetPoint("RIGHT", row.action, "LEFT", -8, 0)
     row.memberLabels = {}
     UI.rows[index] = row
     return row
@@ -217,6 +223,14 @@ local function EventRows()
     return top
 end
 
+local function GuildDecisionError(reason)
+    if reason == "unavailable" then OU.Print(L.GUILD_AUTHORITY_UNAVAILABLE)
+    elseif reason == "not_authorized" then OU.Print(L.GUILD_AUTHORITY_DENIED)
+    elseif reason == "allowlist-capacity" then OU.Print(L.GUILD_ALLOWLIST_FULL)
+    elseif reason == "missing-candidate" then OU.Print(L.GUILD_CANDIDATE_MISSING)
+    else OU.Print(L.GUILD_DECISION_INVALID) end
+end
+
 local function PeopleRows()
     local peers = OU.Util.SortedValues(OU.Runtime.peers, function(a, b)
         if a.role ~= b.role then return a.role == "member" end
@@ -259,6 +273,105 @@ local function PeopleRows()
         row.action:Show()
         top = PlaceRow(row, top, 58)
         rowIndex = rowIndex + 1
+    end
+    local authority = OU.GuildTrust and OU.GuildTrust.RefreshAuthority() or "unavailable"
+    if authority == "authorized" then
+        local section = GetRow(rowIndex)
+        section.heading:SetText(L.GUILD_REVIEW_TITLE)
+        SetColor(section.heading, P.COLORS.gold)
+        section.body:SetText(L.GUILD_REVIEW_HELP)
+        top = PlaceRow(section, top, 66)
+        rowIndex = rowIndex + 1
+
+        local records = OU.GuildTrust.Records(OU.DB)
+        for _, item in ipairs(records) do
+            if item.record.state == "pending" then
+                local record, name = item.record, item.record.displayName
+                local row = GetRow(rowIndex)
+                row.heading:SetText(name)
+                SetColor(row.heading, P.COLORS.amber)
+                row.body:SetText(L.GUILD_STATE_PENDING)
+                row.meta:SetText(L.GUILD_CANDIDATE_UNTRUSTED)
+                row.action:SetText(L.BUTTON_APPROVE_GUILD)
+                row.action:SetSize(100, 22)
+                row.action:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 7)
+                row.action:SetScript("OnClick", function()
+                    local wasLocalParticipant = OU.Identity and OU.Util.IsParticipatingGuild(OU.Identity.guild) or false
+                    local ok, decision, changed = OU.GuildTrust.Decide("approve", name, OU.Util.Now(), OU.DB)
+                    if ok then
+                        OU.Network.SendGuildDecision(decision)
+                        OU.Network.OnGuildTrustChanged(wasLocalParticipant, OU.Util.Now())
+                        OU.Print(L.GUILD_DECISION_APPLIED:format(changed.displayName, L.GUILD_STATE_APPROVED))
+                    else GuildDecisionError(decision) end
+                    OU.RefreshUI()
+                end)
+                P.Tip(row.action, L.BUTTON_APPROVE_GUILD, L.TIP_GUILD_REVIEW)
+                row.action:Show()
+                row.secondaryAction:SetText(L.BUTTON_DENY_GUILD)
+                row.secondaryAction:SetSize(100, 22)
+                row.secondaryAction:SetPoint("RIGHT", row.action, "LEFT", -8, 0)
+                row.secondaryAction:SetScript("OnClick", function()
+                    local wasLocalParticipant = OU.Identity and OU.Util.IsParticipatingGuild(OU.Identity.guild) or false
+                    local ok, decision, changed = OU.GuildTrust.Decide("deny", name, OU.Util.Now(), OU.DB)
+                    if ok then
+                        OU.Network.SendGuildDecision(decision)
+                        OU.Network.OnGuildTrustChanged(wasLocalParticipant, OU.Util.Now())
+                        OU.Print(L.GUILD_DECISION_APPLIED:format(changed.displayName, L.GUILD_STATE_DENIED))
+                    else GuildDecisionError(decision) end
+                    OU.RefreshUI()
+                end)
+                P.Tip(row.secondaryAction, L.BUTTON_DENY_GUILD, L.TIP_GUILD_REVIEW)
+                row.secondaryAction:Show()
+                top = PlaceRow(row, top, 62)
+                rowIndex = rowIndex + 1
+            end
+        end
+    end
+
+    local trustSection = GetRow(rowIndex)
+    trustSection.heading:SetText(L.GUILD_TRUST_TITLE)
+    SetColor(trustSection.heading, P.COLORS.gold)
+    trustSection.body:SetText(L.GUILD_TRUST_HELP)
+    top = PlaceRow(trustSection, top, 66)
+    rowIndex = rowIndex + 1
+    local rootRow = GetRow(rowIndex)
+    rootRow.heading:SetText(OU.GuildTrust and OU.GuildTrust.ROOT_DISPLAY or "OLYMPUS")
+    SetColor(rootRow.heading, P.COLORS.green)
+    rootRow.body:SetText(L.GUILD_STATE_APPROVED)
+    rootRow.meta:SetText(L.GUILD_TRUST_SOURCE_LOCAL)
+    top = PlaceRow(rootRow, top, 54)
+    rowIndex = rowIndex + 1
+    if OU.GuildTrust then
+        for _, item in ipairs(OU.GuildTrust.Records(OU.DB)) do
+            local record, name = item.record, item.record.displayName
+            if record.state == "approved" or (authority == "authorized" and record.state ~= "pending") then
+                local row = GetRow(rowIndex)
+                row.heading:SetText(name)
+                SetColor(row.heading, record.state == "approved" and P.COLORS.green or P.COLORS.amber)
+                row.body:SetText(L["GUILD_STATE_" .. record.state:upper()] or record.state)
+                row.meta:SetText(record.sourceClass == "configured-connector"
+                    and L.GUILD_TRUST_SOURCE_CONNECTOR or L.GUILD_TRUST_SOURCE_LOCAL)
+                if authority == "authorized" then
+                    row.action:SetText(L.BUTTON_RECONSIDER_GUILD)
+                    row.action:SetSize(110, 22)
+                    row.action:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 7)
+                    row.action:SetScript("OnClick", function()
+                        local wasLocalParticipant = OU.Identity and OU.Util.IsParticipatingGuild(OU.Identity.guild) or false
+                        local ok, decision, changed = OU.GuildTrust.Decide("review", name, OU.Util.Now(), OU.DB)
+                        if ok then
+                            OU.Network.SendGuildDecision(decision)
+                            OU.Network.OnGuildTrustChanged(wasLocalParticipant, OU.Util.Now())
+                            OU.Print(L.GUILD_DECISION_APPLIED:format(changed.displayName, L.GUILD_STATE_PENDING))
+                        else GuildDecisionError(decision) end
+                        OU.RefreshUI()
+                    end)
+                    P.Tip(row.action, L.BUTTON_RECONSIDER_GUILD, L.TIP_GUILD_RECONSIDER)
+                    row.action:Show()
+                end
+                top = PlaceRow(row, top, 60)
+                rowIndex = rowIndex + 1
+            end
+        end
     end
     if #peers == 0 then
         local row = GetRow(rowIndex)
@@ -501,7 +614,7 @@ function OU.CreateUI()
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, _, x, y = self:GetPoint(1)
-        OU.DB.window.point, OU.DB.window.x, OU.DB.window.y = point or "CENTER", x or 0, y or 0
+        OU.State.SetWindowPosition(OU.DB, point, x, y)
     end)
     frame:SetScript("OnShow", OU.RefreshUI)
     frame:Hide()

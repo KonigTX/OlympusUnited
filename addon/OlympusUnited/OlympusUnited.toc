@@ -1,7 +1,7 @@
 ## Interface: 16001, 16000
 ## Title: Olympus United
 ## Notes: Member-only Olympus Chat, layer help, events, guild connections, and census totals.
-## Author: Konigtx
+## Author: KonigTX
 ## Version: 0.5.0
 ## SavedVariables: OlympusUnitedDB
 ## IconTexture: Interface\AddOns\OlympusUnited\Media\OlympusLogo
@@ -14,6 +14,7 @@ CensusLogic.lua
 Strings.lua
 Protocol.lua
 State.lua
+GuildTrust.lua
 ChatGuard.lua
 Network.lua
 GuildRoster.lua

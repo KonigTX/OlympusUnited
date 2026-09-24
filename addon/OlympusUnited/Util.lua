@@ -33,6 +33,7 @@ function Util.SanitizeText(value, maxBytes)
 end
 
 function Util.NormalizeName(name, realm)
+    if not Util.IsPlainString(name) or (realm ~= nil and not Util.IsPlainString(realm)) then return nil end
     name = Trim(name)
     if name == "" then return nil end
 
@@ -56,7 +57,7 @@ end
 
 function Util.NormalizeGuild(guild)
     if not Util.IsPlainString(guild) then return nil end
-    guild = Trim(guild):gsub("%s+", " ")
+    guild = (guild:match("^ *(.-) *$") or ""):gsub(" +", " ")
     if guild == "" then return nil end
     return guild:lower()
 end
@@ -73,8 +74,17 @@ function Util.ShortName(name)
     return name:match("^[^-]+") or name
 end
 
-function Util.IsOlympusGuild(guild)
-    return type(guild) == "string" and guild:lower():find("olympus", 1, true) ~= nil
+function Util.IsParticipatingGuild(guild, database)
+    local key = Util.NormalizeGuild(guild)
+    database = database or OU.DB
+    return key ~= nil and type(database) == "table" and type(database.participatingGuilds) == "table"
+        and database.participatingGuilds[key] ~= nil
+end
+
+-- Kept as the compatibility name used by the shipped modules. This is an
+-- exact configured lookup; it no longer performs substring classification.
+function Util.IsOlympusGuild(guild, database)
+    return Util.IsParticipatingGuild(guild, database)
 end
 
 function Util.Count(values)
@@ -155,7 +165,11 @@ function Util.PlayerIdentity()
     if not name and UnitName then name = UnitName("player") end
     if realm and realm ~= "" then name = name .. "-" .. realm end
 
-    local guild = GetGuildInfo and GetGuildInfo("player") or ""
+    local guild = ""
+    if type(GetGuildInfo) == "function" then
+        local ok, value = pcall(GetGuildInfo, "player")
+        if ok and Util.IsPlainString(value) then guild = value end
+    end
     local zone = GetRealZoneText and GetRealZoneText() or ""
     local level = UnitLevel and UnitLevel("player") or 0
     local className, classFile = UnitClass and UnitClass("player") or nil, nil
@@ -168,6 +182,6 @@ function Util.PlayerIdentity()
         level = level or 0,
         className = className or "",
         classFile = classFile or "",
-        role = Util.IsOlympusGuild(guild) and "member" or "guest",
+        role = Util.IsParticipatingGuild(guild) and "member" or "guest",
     }
 end

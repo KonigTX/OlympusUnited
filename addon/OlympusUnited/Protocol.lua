@@ -23,6 +23,7 @@ local VALID_TYPES = {
     CREQ = true,
     CPAGE = true,
     CFAIL = true,
+    GDEC = true,
 }
 
 local function Escape(value)
@@ -50,6 +51,7 @@ local function Split(payload)
 end
 
 local CENSUS_TYPES = { CCAND = true, CLEASE = true, CSUM = true, CREQ = true, CPAGE = true, CFAIL = true }
+local GOVERNANCE_ACTIONS = { approve = true, deny = true, review = true }
 local FAILURE_REASONS = { busy = true, cooldown = true, snapshot = true, unavailable = true, expired = true }
 local function EncodedAtMost(value, limit)
     return type(value) == "string" and #Escape(value) <= limit
@@ -89,6 +91,23 @@ local function ValidateCensus(messageType, id, fields, origin)
     return true
 end
 
+local function ValidateGovernance(id, fields, origin)
+    if not Token(id, 40) or not EncodedAtMost(origin, 48) or #fields ~= 7 then
+        return nil, "invalid governance envelope"
+    end
+    local rootKey, targetKey, targetDisplay, action, generation, previous, decidedAt =
+        fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7]
+    if rootKey ~= "olympus" or not EncodedAtMost(targetKey, 32) or not EncodedAtMost(targetDisplay, 32)
+        or OU.Util.NormalizeGuild(targetKey) ~= targetKey or OU.Util.NormalizeGuild(targetDisplay) ~= targetKey
+        or targetKey == "olympus" or not GOVERNANCE_ACTIONS[action]
+        or not UInt(generation, 2147483647) or tonumber(generation) < 1
+        or not (previous == "-" or Token(previous, 40))
+        or not UInt(decidedAt, 9999999999) then
+        return nil, "invalid governance decision"
+    end
+    return true
+end
+
 function Protocol.Encode(messageType, id, fields, origin, hops)
     if not VALID_TYPES[messageType] then return nil, "unknown message type" end
     if type(id) ~= "string" or id == "" then return nil, "message id is required" end
@@ -100,6 +119,9 @@ function Protocol.Encode(messageType, id, fields, origin, hops)
     fields = fields or {}
     if CENSUS_TYPES[messageType] then
         local ok, err = ValidateCensus(messageType, id, fields, origin)
+        if not ok then return nil, err end
+    elseif messageType == "GDEC" then
+        local ok, err = ValidateGovernance(id, fields, origin)
         if not ok then return nil, err end
     end
 
@@ -134,6 +156,9 @@ function Protocol.Decode(payload)
     if CENSUS_TYPES[messageType] then
         local ok = ValidateCensus(messageType, id, body, origin)
         if not ok then return nil, "invalid census message" end
+    elseif messageType == "GDEC" then
+        local ok = ValidateGovernance(id, body, origin)
+        if not ok then return nil, "invalid governance message" end
     end
     return { version = version, type = messageType, id = id, origin = origin, hops = hops, fields = body }
 end
@@ -214,4 +239,10 @@ function Protocol.Release(candidate)
     return "RELEASE", OU.Util.MakeID("release"), { OU.Util.SanitizeText(candidate, 64) }
 end
 
-Protocol._Test = { Escape = Escape, Unescape = Unescape, Separator = SEP, ValidateCensus = ValidateCensus }
+function Protocol.GuildDecision(decision)
+    if type(decision) ~= "table" then return nil, "invalid governance decision" end
+    return "GDEC", decision.id, decision.fields, decision.origin
+end
+
+Protocol._Test = { Escape = Escape, Unescape = Unescape, Separator = SEP, ValidateCensus = ValidateCensus,
+    ValidateGovernance = ValidateGovernance }

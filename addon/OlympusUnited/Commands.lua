@@ -10,6 +10,7 @@ local function Help()
     OU.Print(L.HELP_LAYER)
     OU.Print(L.HELP_EVENT)
     OU.Print(L.HELP_LINK)
+    OU.Print(L.HELP_GUILDS)
     OU.Print(L.HELP_GUEST)
     OU.Print(L.HELP_NOTIFY)
     OU.Print(L.HELP_RECRUIT)
@@ -75,10 +76,10 @@ local function DNC(input)
     action = action and action:lower() or ""
     local key = OU.Util.NormalizeName(name)
     if action == "add" and key then
-        OU.DB.recruiting.doNotContact[key] = true
-        OU.Print(L.DNC_ADDED:format(name))
+        local ok = OU.State.SetDoNotContact(OU.DB, name, true)
+        OU.Print(ok and L.DNC_ADDED:format(name) or L.DNC_FULL)
     elseif action == "remove" and key then
-        OU.DB.recruiting.doNotContact[key] = nil
+        OU.State.SetDoNotContact(OU.DB, name, false)
         OU.Print(L.DNC_REMOVED:format(name))
     elseif action == "list" or input == "list" then
         local count = 0
@@ -90,6 +91,57 @@ local function DNC(input)
     else
         OU.Print(L.HELP_DNC_USAGE)
     end
+end
+
+local function GuildAuthority()
+    local authority = OU.GuildTrust and OU.GuildTrust.LocalAuthority() or "unavailable"
+    if OU.GuildTrust then OU.GuildTrust.authority = authority end
+    if authority == "authorized" then return true end
+    OU.Print(authority == "unavailable" and L.GUILD_AUTHORITY_UNAVAILABLE or L.GUILD_AUTHORITY_DENIED)
+    return false
+end
+
+local function GuildCommand(input)
+    local action, name = OU.Util.Trim(input):match("^(%S*)%s*(.-)$")
+    action = (action or ""):lower()
+    if action == "review" then
+        if not GuildAuthority() then return end
+        local count = 0
+        for _, item in ipairs(OU.GuildTrust.Records(OU.DB)) do
+            if item.record.state == "pending" then
+                count = count + 1
+                OU.Print(L.GUILD_REVIEW_ITEM:format(item.record.displayName))
+            end
+        end
+        if count == 0 then OU.Print(L.GUILD_REVIEW_EMPTY) end
+        return
+    elseif action == "status" and name ~= "" then
+        if not GuildAuthority() then return end
+        local status, record = OU.GuildTrust.Status(name, OU.DB)
+        OU.Print(L.GUILD_STATUS:format(record and record.displayName or name, L["GUILD_STATE_" .. status:upper()] or status))
+        return
+    end
+    local wireAction = action == "reconsider" and "review" or action
+    if (wireAction == "approve" or wireAction == "deny" or wireAction == "review") and name ~= "" then
+        local wasLocalParticipant = OU.Identity and OU.Util.IsParticipatingGuild(OU.Identity.guild) or false
+        local ok, decision, record = OU.GuildTrust.Decide(wireAction, name, OU.Util.Now(), OU.DB)
+        if not ok then
+            local reason = decision
+            if reason == "unavailable" then OU.Print(L.GUILD_AUTHORITY_UNAVAILABLE)
+            elseif reason == "not_authorized" then OU.Print(L.GUILD_AUTHORITY_DENIED)
+            elseif reason == "allowlist-capacity" then OU.Print(L.GUILD_ALLOWLIST_FULL)
+            elseif reason == "missing-candidate" then OU.Print(L.GUILD_CANDIDATE_MISSING)
+            else OU.Print(L.GUILD_DECISION_INVALID) end
+            return
+        end
+        OU.Network.OnGuildTrustChanged(wasLocalParticipant, OU.Util.Now())
+        local shared = OU.Network.SendGuildDecision(decision)
+        local label = L["GUILD_STATE_" .. record.state:upper()] or record.state
+        OU.Print(L.GUILD_DECISION_APPLIED:format(record.displayName, label))
+        if not shared and OU.Util.Count(OU.DB.bridges) > 0 then OU.Print(L.GUILD_DECISION_NOT_SHARED) end
+        return
+    end
+    OU.Print(L.HELP_GUILD_USAGE)
 end
 
 local function Claim(name)
@@ -162,6 +214,8 @@ SlashCmdList.OLYMPUSUNITED = function(input)
         OU.Result(OU.Network.ReleaseRecruit(rest), nil, L.CLAIM_RELEASED)
     elseif command == "dnc" then
         DNC(rest)
+    elseif command == "guild" then
+        GuildCommand(rest)
     elseif command == "status" then
         OU.Print(OU.StatusText())
         OU.Print(L.STATUS_COUNTS:format(

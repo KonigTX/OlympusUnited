@@ -5,6 +5,16 @@ local GOLD = "|cffffc84a"
 local BLUE = "|cff59c7ff"
 local RESET = "|r"
 
+local function RefreshGuildTrust()
+    if not OU.GuildTrust or not OU.DB then return end
+    OU.GuildTrust.RefreshAuthority()
+    local ok, guild = false, nil
+    if type(GetGuildInfo) == "function" then ok, guild = pcall(GetGuildInfo, "player") end
+    if ok and OU.Util.IsPlainString(guild) then
+        OU.GuildTrust.Observe(guild, "local-visible", OU.Util.Now(), OU.DB)
+    end
+end
+
 function OU.Print(message)
     local frame = DEFAULT_CHAT_FRAME
     if frame and frame.AddMessage then
@@ -75,6 +85,7 @@ controller:SetScript("OnEvent", function(self, event, ...)
         self:RegisterEvent("WHO_LIST_UPDATE")
         self:UnregisterEvent("ADDON_LOADED")
     elseif event == "PLAYER_LOGIN" then
+        RefreshGuildTrust()
         if OU.ChatGuard then OU.ChatGuard.Start() end
         OU.Network.RegisterPrefix()
         if OU.CreateUI then OU.CreateUI() end
@@ -89,8 +100,12 @@ controller:SetScript("OnEvent", function(self, event, ...)
         OU.Network.OnAddonMessage(...)
     elseif event == "GUILD_ROSTER_UPDATE" then
         if OU.GuildRoster then OU.GuildRoster.OnEvent(event, ...) end
+        OU.Identity = OU.Util.PlayerIdentity()
+        RefreshGuildTrust()
+        if OU.RefreshUI then OU.RefreshUI() end
     elseif event == "PLAYER_GUILD_UPDATE" or event == "ZONE_CHANGED_NEW_AREA" then
         OU.Identity = OU.Util.PlayerIdentity()
+        if event == "PLAYER_GUILD_UPDATE" then RefreshGuildTrust() end
         if OU.ChatGuard then OU.ChatGuard.OnEvent(event, ...) end
         OU.Network.SendHello()
         if event == "PLAYER_GUILD_UPDATE" and OU.Census then OU.Census.OnGuildChanged() end
